@@ -2591,10 +2591,14 @@ function HeuresSup({ employees, entries, heuresSup }) {
       </div>
 
       <p className="text-xs mb-4" style={{ color: "#8A8271" }}>
-        Seuils calculés sur les <strong>heures effectivement travaillées</strong> (pas les heures payées) : normal
-        jusqu'à {heuresSup.seuilNormal}h/semaine, majoration {heuresSup.tauxMajo1}% de{" "}
-        {heuresSup.seuilNormal + 1}h à {heuresSup.seuilMajo2}h effectuées, puis {heuresSup.tauxMajo2}% au-delà.
-        Réglable dans Paramètres.
+        Seuils calculés sur les <strong>heures effectivement travaillées</strong> (pas les heures payées), par{" "}
+        {heuresSup.mode === "mensuel" ? "mois" : "semaine"} : normal jusqu'à{" "}
+        {heuresSup.mode === "mensuel" ? heuresSup.seuilNormalMensuel : heuresSup.seuilNormal}h, majoration{" "}
+        {heuresSup.tauxMajo1}% sur les{" "}
+        {heuresSup.mode === "mensuel"
+          ? heuresSup.plageMajo1Mensuel
+          : heuresSup.seuilMajo2 - heuresSup.seuilNormal}
+        h suivantes, puis {heuresSup.tauxMajo2}% au-delà. Réglable dans Paramètres.
       </p>
 
       {employees.length === 0 && <EmptyState text="Aucun salarié." />}
@@ -2840,10 +2844,15 @@ function SimulationPaie({ employees, entries, transactions, primes, heuresSup, t
       </div>
 
       <p className="text-xs mb-4" style={{ color: "#8A8271" }}>
-        Estimation indicative à partir des heures pointées, du taux horaire de chaque salarié et des seuils
-        d'heures sup réglés dans Paramètres. Le net déduit un taux de cotisations sociales estimé ({tauxCotisations}%,
-        réglable dans Paramètres) ainsi que les avances/acomptes de la période — ceci reste indicatif, pas une
-        fiche de paie officielle.
+        Mode de calcul des heures sup :{" "}
+        <strong>
+          {heuresSup.mode === "mensuel"
+            ? `mensuel — ${heuresSup.seuilNormalMensuel}h normales, +${heuresSup.tauxMajo1}% sur les ${heuresSup.plageMajo1Mensuel}h suivantes, +${heuresSup.tauxMajo2}% au-delà`
+            : `hebdomadaire — ${heuresSup.seuilNormal}h normales, +${heuresSup.tauxMajo1}% de ${heuresSup.seuilNormal + 1}h à ${heuresSup.seuilMajo2}h, +${heuresSup.tauxMajo2}% au-delà`}
+        </strong>{" "}
+        (réglable dans Paramètres). Estimation indicative à partir des heures pointées et du taux horaire de chaque
+        salarié. Le net déduit un taux de cotisations sociales estimé ({tauxCotisations}%, sur brut + congés payés +
+        primes) ainsi que les avances/acomptes de la période — ceci reste indicatif, pas une fiche de paie officielle.
       </p>
 
       <div className="space-y-2">
@@ -3486,7 +3495,12 @@ function FicheSalarieContent({ emp, data, start, end, heuresSup, tauxCotisations
 
       {/* Heures */}
       <div style={{ background: PALETTE.card, border: `1px solid ${PALETTE.line}` }} className="rounded-md p-4">
-        <h3 className="font-semibold mb-2">Heures</h3>
+        <div className="flex items-center justify-between mb-2">
+          <h3 className="font-semibold">Heures</h3>
+          <span className="text-xs" style={{ color: "#8A8271" }}>
+            Heures sup : mode {heuresSup.mode === "mensuel" ? "mensuel" : "hebdomadaire"}
+          </span>
+        </div>
         <div className="grid grid-cols-2 gap-3 text-sm">
           <div>
             <div style={{ color: "#8A8271" }} className="text-xs">
