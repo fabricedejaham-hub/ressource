@@ -91,6 +91,7 @@ const AlertTriangle = mkIcon("⚠️");
 const Award = mkIcon("🏆");
 const Table = mkIcon("▦");
 const ListChecks = mkIcon("☑");
+const Calendar = mkIcon("📆");
 
 
 // ---------- Helpers ----------
@@ -312,6 +313,22 @@ const splitOvertime = (totalHeures, hs) => {
   return { normales, majo1, majo2 };
 };
 
+// Phrase explicative du calcul des heures sup, pour affichage à titre d'information à côté des totaux.
+// Prend le total d'heures (base choisie dans Paramètres) déjà regroupé sur la bonne période (semaine ou
+// période entière selon le mode), et détaille le seuil normal, puis chaque tranche de majoration atteinte.
+const overtimeExplanation = (total, hs) => {
+  const mensuel = hs && hs.mode === "mensuel";
+  const s1 = mensuel ? Number(hs.seuilNormalMensuel) : Number(hs.seuilNormal);
+  const s2 = mensuel ? s1 + Number(hs.plageMajo1Mensuel) : Number(hs.seuilMajo2);
+  const { normales, majo1, majo2 } = splitOvertime(total, hs);
+  const baseLabel = (hs && hs.base) === "payees" ? "payées" : "effectives";
+  const periodeLabel = mensuel ? "sur la période" : "sur la semaine";
+  const parts = [`${fmtHours(normales)} normales (jusqu'à ${s1}h)`];
+  if (majo1 > 0) parts.push(`${fmtHours(majo1)} à +${hs.tauxMajo1}% (de ${s1}h à ${s2}h)`);
+  if (majo2 > 0) parts.push(`${fmtHours(majo2)} à +${hs.tauxMajo2}% (au-delà de ${s2}h)`);
+  return `${fmtHours(total)} ${baseLabel} ${periodeLabel} = ${parts.join(" + ")}`;
+};
+
 // ---------- Main App ----------
 function PointageApp() {
   const [loading, setLoading] = useState(true);
@@ -514,6 +531,16 @@ function PointageApp() {
             setSelectedDate={setSelectedDate}
           />
         )}
+        {tab === "pointageMensuel" && (
+          <PointageMensuel
+            employees={employees}
+            entries={entries}
+            updateEntries={updateEntries}
+            tachesEcart={tachesEcart}
+            taches={taches}
+            heuresDefaut={heuresDefaut}
+          />
+        )}
         {tab === "salaries" && <Salaries employees={employees} updateEmployees={updateEmployees} />}
         {tab === "equipes" && <Equipes employees={employees} teams={teams} updateTeams={updateTeams} />}
         {tab === "avances" && (
@@ -653,6 +680,7 @@ function TabBar({ tab, setTab }) {
   const items = [
     { id: "dashboard", label: "Tableau de bord", icon: LayoutDashboard },
     { id: "pointage", label: "Pointage", icon: ClipboardList },
+    { id: "pointageMensuel", label: "Pointage par salarié", icon: Calendar },
     { id: "salaries", label: "Salariés", icon: Users },
     { id: "equipes", label: "Équipes", icon: Users2 },
     { id: "avances", label: "Avances", icon: Wallet },
@@ -1071,6 +1099,444 @@ function Pointage({ employees, teams, entries, updateEntries, tachesEcart, tache
 
 // ---------- Salariés (employee management) ----------
 const TYPES_CONTRAT = ["CDI", "CDD", "Saisonnier", "Autre"];
+
+// ---------- Pointage par salarié (saisie d'un salarié sur plusieurs jours/semaines d'un coup) ----------
+function PointageMensuel({ employees, entries, updateEntries, tachesEcart, taches, heuresDefaut }) {
+  const [employeeId, setEmployeeId] = useState(employees[0]?.id || "");
+  const [start, setStart] = useState(() => {
+    const d = new Date();
+    d.setDate(1);
+    return d.toISOString().slice(0, 10);
+  });
+  const [end, setEnd] = useState(() => {
+    const d = new Date();
+    d.setMonth(d.getMonth() + 1, 0); // dernier jour du mois en cours
+    return d.toISOString().slice(0, 10);
+  });
+
+  useEffect(() => {
+    if (!employeeId && employees.length > 0) setEmployeeId(employees[0].id);
+  }, [employees, employeeId]);
+
+  const [selectedDates, setSelectedDates] = useState([]);
+  const [bulkTache, setBulkTache] = useState(taches[0]);
+  const [bulkEff, setBulkEff] = useState(heuresDefaut);
+  const [bulkPaye, setBulkPaye] = useState(heuresDefaut);
+  const [bulkParcelle, setBulkParcelle] = useState("");
+
+  // La sélection est propre au salarié affiché
+  useEffect(() => {
+    setSelectedDates([]);
+  }, [employeeId]);
+
+  // Liste des dates entre start et end (inclus)
+  const dates = useMemo(() => {
+    const list = [];
+    let d = new Date(start + "T00:00:00");
+    const endDate = new Date(end + "T00:00:00");
+    let garde = 0;
+    while (d <= endDate && garde < 400) {
+      list.push(d.toISOString().slice(0, 10));
+      d.setDate(d.getDate() + 1);
+      garde++;
+    }
+    return list;
+  }, [start, end]);
+
+  // Regroupe les dates par semaine (lundi) pour l'affichage
+  const semaines = useMemo(() => {
+    const map = {};
+    dates.forEach((date) => {
+      const wk = weekStart(date);
+      if (!map[wk]) map[wk] = [];
+      map[wk].push(date);
+    });
+    return Object.keys(map)
+      .sort()
+      .map((wk) => ({ wk, dates: map[wk] }));
+  }, [dates]);
+
+  const segmentsFor = (date) => entries.filter((e) => e.employeeId === employeeId && e.date === date && e.present);
+  const absenceFor = (date) => entries.find((e) => e.employeeId === employeeId && e.date === date && !e.present);
+
+  const toggleDateSelected = (date) => {
+    setSelectedDates((prev) => (prev.includes(date) ? prev.filter((d) => d !== date) : [...prev, date]));
+  };
+
+  const selectWeek = (weekDates) => {
+    setSelectedDates((prev) => {
+      const allSelected = weekDates.every((d) => prev.includes(d));
+      if (allSelected) return prev.filter((d) => !weekDates.includes(d));
+      return Array.from(new Set([...prev, ...weekDates]));
+    });
+  };
+
+  const bulkSeparee = tachesEcart.includes(bulkTache);
+
+  // Ajoute un poste identique à tous les jours sélectionnés, sans écraser ce qui existe déjà
+  const applyBulk = () => {
+    const additions = selectedDates.map((date) => ({
+      id: uid(),
+      date,
+      employeeId,
+      present: true,
+      tache: bulkTache,
+      heuresEffectives: bulkEff,
+      heuresPayees: bulkSeparee ? bulkPaye : bulkEff,
+      parcelle: bulkParcelle,
+      note: "",
+    }));
+    // Retire les éventuelles entrées d'absence des jours sélectionnés
+    const absentIds = new Set(selectedDates.map((d) => absenceFor(d)?.id).filter(Boolean));
+    const next = entries.filter((e) => !absentIds.has(e.id));
+    updateEntries([...next, ...additions]);
+    setSelectedDates([]);
+    setBulkParcelle("");
+  };
+
+  const addSegment = (date) => {
+    const base = {
+      id: uid(),
+      date,
+      employeeId,
+      present: true,
+      heuresEffectives: heuresDefaut,
+      heuresPayees: heuresDefaut,
+      tache: taches[0],
+      parcelle: "",
+      note: "",
+    };
+    if (!tachesEcart.includes(base.tache)) base.heuresPayees = base.heuresEffectives;
+    const abs = absenceFor(date);
+    const next = abs ? entries.filter((e) => e.id !== abs.id) : entries;
+    updateEntries([...next, base]);
+  };
+
+  const updateSegment = (entryId, patch) => {
+    const existing = entries.find((e) => e.id === entryId);
+    if (!existing) return;
+    const merged = { ...existing, ...patch };
+    if (!tachesEcart.includes(merged.tache)) merged.heuresPayees = merged.heuresEffectives;
+    updateEntries(entries.map((e) => (e.id === entryId ? merged : e)));
+  };
+
+  const removeSegment = (entryId) => {
+    updateEntries(entries.filter((e) => e.id !== entryId));
+  };
+
+  const setMotif = (date, motif) => {
+    const abs = absenceFor(date);
+    if (abs) {
+      updateEntries(entries.map((e) => (e.id === abs.id ? { ...e, motif } : e)));
+    } else {
+      updateEntries([
+        ...entries,
+        { id: uid(), date, employeeId, present: false, motif, heuresEffectives: 0, heuresPayees: 0, tache: taches[0], parcelle: "", note: "" },
+      ]);
+    }
+  };
+
+  if (employees.length === 0) {
+    return <EmptyState text="Ajoutez d'abord vos salariés dans l'onglet « Salariés »." />;
+  }
+
+  const emp = employees.find((e) => e.id === employeeId);
+  const totalEff = dates.reduce((s, date) => s + segmentsFor(date).reduce((s2, seg) => s2 + Number(seg.heuresEffectives || 0), 0), 0);
+  const totalPaye = dates.reduce(
+    (s, date) => s + segmentsFor(date).reduce((s2, seg) => s2 + Number(seg.heuresPayees ?? seg.heuresEffectives ?? 0), 0),
+    0
+  );
+
+  return (
+    <div>
+      <div className="flex flex-wrap items-end gap-3 mb-3">
+        <div>
+          <label className="block text-xs mb-1" style={{ color: "#8A8271" }}>
+            Salarié
+          </label>
+          <select
+            value={employeeId}
+            onChange={(e) => setEmployeeId(e.target.value)}
+            className="px-2 py-2 rounded border text-sm min-w-[160px]"
+            style={{ borderColor: PALETTE.line }}
+          >
+            {employees.map((e) => (
+              <option key={e.id} value={e.id}>
+                {e.nom}
+              </option>
+            ))}
+          </select>
+        </div>
+        <div>
+          <label className="block text-xs mb-1" style={{ color: "#8A8271" }}>
+            Du
+          </label>
+          <input
+            type="date"
+            value={start}
+            onChange={(e) => setStart(e.target.value)}
+            className="px-2 py-2 rounded border text-sm"
+            style={{ borderColor: PALETTE.line }}
+          />
+        </div>
+        <div>
+          <label className="block text-xs mb-1" style={{ color: "#8A8271" }}>
+            Au
+          </label>
+          <input
+            type="date"
+            value={end}
+            onChange={(e) => setEnd(e.target.value)}
+            className="px-2 py-2 rounded border text-sm"
+            style={{ borderColor: PALETTE.line }}
+          />
+        </div>
+      </div>
+
+      {emp && (
+        <div className="flex gap-4 text-sm mb-4 flex-wrap" style={{ color: "#6B6552" }}>
+          <span>
+            <strong>{emp.nom}</strong>
+          </span>
+          <span>
+            Effectives : <strong style={{ color: PALETTE.green }}>{fmtHours(totalEff)}</strong>
+          </span>
+          <span>
+            Payées : <strong style={{ color: PALETTE.rust }}>{fmtHours(totalPaye)}</strong>
+          </span>
+        </div>
+      )}
+
+      {selectedDates.length > 0 && (
+        <div
+          style={{ background: "#EFEADA", border: `1px solid ${PALETTE.green}` }}
+          className="rounded-md p-3 mb-4 flex items-center gap-2 flex-wrap"
+        >
+          <span className="text-sm font-medium" style={{ color: PALETTE.greenDark }}>
+            {selectedDates.length} jour(s) sélectionné(s)
+          </span>
+          <select
+            value={bulkTache}
+            onChange={(e) => setBulkTache(e.target.value)}
+            className="px-2 py-1.5 rounded border text-sm min-w-[150px]"
+            style={{ borderColor: PALETTE.line, background: "#fff" }}
+          >
+            {taches.map((t) => (
+              <option key={t} value={t}>
+                {t}
+              </option>
+            ))}
+          </select>
+          <input
+            type="number"
+            step="0.25"
+            min="0"
+            value={bulkEff}
+            onChange={(e) => setBulkEff(e.target.value)}
+            className="w-20 px-2 py-1.5 rounded border text-sm"
+            style={{ borderColor: PALETTE.line, background: "#fff" }}
+            title="Heures effectives"
+          />
+          {bulkSeparee && (
+            <input
+              type="number"
+              step="0.25"
+              min="0"
+              value={bulkPaye}
+              onChange={(e) => setBulkPaye(e.target.value)}
+              className="w-20 px-2 py-1.5 rounded border text-sm"
+              style={{ borderColor: PALETTE.rust, background: "#FBF0E9" }}
+              title="Heures payées"
+            />
+          )}
+          <input
+            type="text"
+            placeholder="Parcelle"
+            value={bulkParcelle}
+            onChange={(e) => setBulkParcelle(e.target.value)}
+            className="px-2 py-1.5 rounded border text-sm w-28"
+            style={{ borderColor: PALETTE.line, background: "#fff" }}
+          />
+          <button
+            onClick={applyBulk}
+            style={{ background: PALETTE.green }}
+            className="px-4 py-1.5 rounded text-white text-sm font-medium"
+          >
+            Ajouter ce poste
+          </button>
+          <button onClick={() => setSelectedDates([])} className="text-sm" style={{ color: "#8A8271" }}>
+            Annuler
+          </button>
+        </div>
+      )}
+
+      <div className="space-y-4">
+        {semaines.map(({ wk, dates: weekDates }) => {
+          const weekAllSelected = weekDates.every((d) => selectedDates.includes(d));
+          return (
+          <div key={wk} style={{ background: PALETTE.card, border: `1px solid ${PALETTE.line}` }} className="rounded-md overflow-hidden">
+            <div
+              className="px-4 py-2.5 flex items-center justify-between"
+              style={{ background: PALETTE.bg, borderBottom: `1px solid ${PALETTE.line}` }}
+            >
+              <span className="font-medium text-sm">{weekLabel(wk)}</span>
+              <button
+                onClick={() => selectWeek(weekDates)}
+                className="text-xs px-2 py-1 rounded border"
+                style={{
+                  borderColor: weekAllSelected ? PALETTE.green : PALETTE.line,
+                  color: weekAllSelected ? PALETTE.green : "#8A8271",
+                }}
+              >
+                {weekAllSelected ? "✓ Semaine sélectionnée" : "Sélectionner la semaine"}
+              </button>
+            </div>
+            <div className="divide-y" style={{ borderColor: PALETTE.line }}>
+              {weekDates.map((date) => {
+                const segments = segmentsFor(date);
+                const abs = absenceFor(date);
+                const present = segments.length > 0;
+                const isSelected = selectedDates.includes(date);
+                return (
+                  <div
+                    key={date}
+                    className="p-3"
+                    style={{ borderTop: `1px solid ${PALETTE.line}`, background: isSelected ? "#EFEADA" : "transparent" }}
+                  >
+                    <div className="flex items-center gap-2 flex-wrap mb-1.5">
+                      <input
+                        type="checkbox"
+                        checked={isSelected}
+                        onChange={() => toggleDateSelected(date)}
+                        className="w-4 h-4 shrink-0"
+                        style={{ accentColor: PALETTE.green }}
+                        title="Sélectionner ce jour pour une application groupée"
+                      />
+                      <div className="min-w-[110px] text-sm font-medium capitalize">
+                        {new Date(date + "T00:00:00").toLocaleDateString("fr-FR", { weekday: "short", day: "numeric", month: "short" })}
+                      </div>
+                      {segments.length <= 1 && (
+                        <button
+                          onClick={() => addSegment(date)}
+                          className="text-xs px-2 py-1 rounded flex items-center gap-1"
+                          style={{ border: `1px solid ${PALETTE.green}`, color: PALETTE.green }}
+                        >
+                          <Plus size={12} /> {present ? "Ajouter un poste" : "Marquer présent"}
+                        </button>
+                      )}
+                      {!present && (
+                        <>
+                          <span className="text-xs italic" style={{ color: "#B5AA88" }}>
+                            Absent
+                          </span>
+                          <select
+                            value={abs?.motif ?? ""}
+                            onChange={(e) => setMotif(date, e.target.value)}
+                            className="px-2 py-1 rounded border text-xs"
+                            style={{ borderColor: PALETTE.line, background: "#fff", color: "#6B6552" }}
+                          >
+                            <option value="">Motif (optionnel)</option>
+                            {ABSENCE_MOTIFS.map((m) => (
+                              <option key={m} value={m}>
+                                {m}
+                              </option>
+                            ))}
+                          </select>
+                        </>
+                      )}
+                      {segments.length > 1 && (
+                        <span className="text-xs" style={{ color: "#8A8271" }}>
+                          {segments.length} postes — à modifier dans l'onglet Pointage
+                        </span>
+                      )}
+                    </div>
+
+                    {segments.length === 1 &&
+                      segments.map((seg) => {
+                        const separee = tachesEcart.includes(seg.tache);
+                        return (
+                          <div key={seg.id} className="flex items-center gap-2 flex-wrap ml-3 mt-1">
+                            <select
+                              value={seg.tache}
+                              onChange={(e) => updateSegment(seg.id, { tache: e.target.value })}
+                              className="px-2 py-1.5 rounded border text-sm min-w-[150px]"
+                              style={{ borderColor: PALETTE.line, background: "#fff" }}
+                            >
+                              {taches.map((t) => (
+                                <option key={t} value={t}>
+                                  {t}
+                                  {tachesEcart.includes(t) ? " ⚑" : ""}
+                                </option>
+                              ))}
+                            </select>
+                            <div className="flex items-center gap-1.5">
+                              <input
+                                type="number"
+                                step="0.25"
+                                min="0"
+                                max="24"
+                                value={seg.heuresEffectives ?? heuresDefaut}
+                                onChange={(e) =>
+                                  updateSegment(seg.id, {
+                                    heuresEffectives: e.target.value,
+                                    ...(separee ? {} : { heuresPayees: e.target.value }),
+                                  })
+                                }
+                                className="w-20 px-2 py-1.5 rounded border text-sm"
+                                style={{ borderColor: PALETTE.line, background: "#fff" }}
+                              />
+                              <span className="text-xs" style={{ color: "#8A8271" }}>
+                                {separee ? "h eff." : "heures"}
+                              </span>
+                            </div>
+                            {separee && (
+                              <div className="flex items-center gap-1.5">
+                                <input
+                                  type="number"
+                                  step="0.25"
+                                  min="0"
+                                  max="24"
+                                  value={seg.heuresPayees ?? seg.heuresEffectives ?? heuresDefaut}
+                                  onChange={(e) => updateSegment(seg.id, { heuresPayees: e.target.value })}
+                                  className="w-20 px-2 py-1.5 rounded border text-sm"
+                                  style={{ borderColor: PALETTE.rust, background: "#FBF0E9" }}
+                                />
+                                <span className="text-xs" style={{ color: PALETTE.rust }}>
+                                  h payées
+                                </span>
+                              </div>
+                            )}
+                            <input
+                              type="text"
+                              placeholder="Parcelle"
+                              value={seg.parcelle ?? ""}
+                              onChange={(e) => updateSegment(seg.id, { parcelle: e.target.value })}
+                              className="px-2 py-1.5 rounded border text-sm w-28"
+                              style={{ borderColor: PALETTE.line, background: "#fff" }}
+                            />
+                            <button
+                              onClick={() => removeSegment(seg.id)}
+                              className="p-1.5 rounded hover:bg-black/5"
+                              style={{ color: PALETTE.rust }}
+                              title="Marquer absent (supprime ce poste)"
+                            >
+                              <Trash2 size={14} />
+                            </button>
+                          </div>
+                        );
+                      })}
+                  </div>
+                );
+              })}
+            </div>
+          </div>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
 
 function Salaries({ employees, updateEmployees }) {
   const [nom, setNom] = useState("");
@@ -2696,31 +3162,36 @@ function HeuresSup({ employees, entries, heuresSup }) {
                 return (
                   <div
                     key={wk}
-                    className="px-4 py-2.5 text-sm flex items-center justify-between flex-wrap gap-2"
+                    className="px-4 py-2.5 text-sm"
                     style={{ borderTop: i === 0 ? "none" : `1px solid ${PALETTE.line}` }}
                   >
-                    <span style={{ color: "#6B6552" }}>{periodLabel(wk, heuresSup, start, end)}</span>
-                    <span className="flex gap-3 flex-wrap">
-                      <span>Normales : <strong>{fmtHours(normales)}</strong></span>
-                      {majo1 > 0 && (
-                        <span style={{ color: PALETTE.rust }}>
-                          +{heuresSup.tauxMajo1}% : <strong>{fmtHours(majo1)}</strong>
-                        </span>
-                      )}
-                      {majo2 > 0 && (
-                        <span style={{ color: PALETTE.rust }}>
-                          +{heuresSup.tauxMajo2}% : <strong>{fmtHours(majo2)}</strong>
-                        </span>
-                      )}
-                      {extraPaye > 0 && (
-                        <span style={{ color: "#8A8271" }}>
-                          + payé hors travail effectif : <strong>{fmtHours(extraPaye)}</strong>
-                        </span>
-                      )}
-                      {cost !== null && (
-                        <span style={{ color: PALETTE.green }}>≈ {cost.toFixed(2)} €</span>
-                      )}
-                    </span>
+                    <div className="flex items-center justify-between flex-wrap gap-2">
+                      <span style={{ color: "#6B6552" }}>{periodLabel(wk, heuresSup, start, end)}</span>
+                      <span className="flex gap-3 flex-wrap">
+                        <span>Normales : <strong>{fmtHours(normales)}</strong></span>
+                        {majo1 > 0 && (
+                          <span style={{ color: PALETTE.rust }}>
+                            +{heuresSup.tauxMajo1}% : <strong>{fmtHours(majo1)}</strong>
+                          </span>
+                        )}
+                        {majo2 > 0 && (
+                          <span style={{ color: PALETTE.rust }}>
+                            +{heuresSup.tauxMajo2}% : <strong>{fmtHours(majo2)}</strong>
+                          </span>
+                        )}
+                        {extraPaye > 0 && (
+                          <span style={{ color: "#8A8271" }}>
+                            + payé hors travail effectif : <strong>{fmtHours(extraPaye)}</strong>
+                          </span>
+                        )}
+                        {cost !== null && (
+                          <span style={{ color: PALETTE.green }}>≈ {cost.toFixed(2)} €</span>
+                        )}
+                      </span>
+                    </div>
+                    <div className="text-xs mt-1" style={{ color: "#8A8271" }}>
+                      {overtimeExplanation(normales + majo1 + majo2, heuresSup)}
+                    </div>
                   </div>
                 );
               })}
@@ -2947,9 +3418,7 @@ function SimulationPaie({ employees, entries, transactions, primes, heuresSup, t
               ) : (
                 <div className="text-xs space-y-1" style={{ color: "#6B6552" }}>
                   <div style={{ color: "#8A8271" }}>
-                    Heures : {fmtHours(b.normales)} normales
-                    {b.majo1 > 0 ? ` · +${heuresSup.tauxMajo1}% ${fmtHours(b.majo1)}` : ""}
-                    {b.majo2 > 0 ? ` · +${heuresSup.tauxMajo2}% ${fmtHours(b.majo2)}` : ""}
+                    {overtimeExplanation(b.normales + b.majo1 + b.majo2, heuresSup)}
                     {b.extraPaye > 0 ? ` · +${fmtHours(b.extraPaye)} payées hors travail effectif` : ""}
                   </div>
                   <div className="flex justify-between pt-1" style={{ borderTop: `1px solid ${PALETTE.line}` }}>
@@ -3598,20 +4067,10 @@ function FicheSalarieContent({ emp, data, start, end, heuresSup, tauxCotisations
             </div>
           </div>
         </div>
-        {(heuresSupCalc.majo1 > 0 || heuresSupCalc.majo2 > 0 || heuresSupCalc.extraPaye > 0) && (
-          <div className="text-xs mt-3 pt-3 flex flex-wrap gap-x-4 gap-y-1" style={{ borderTop: `1px solid ${PALETTE.line}`, color: "#6B6552" }}>
-            <span>Normales : {fmtHours(heuresSupCalc.normales)}</span>
-            {heuresSupCalc.majo1 > 0 && (
-              <span>
-                +{heuresSup.tauxMajo1}% : {fmtHours(heuresSupCalc.majo1)}
-              </span>
-            )}
-            {heuresSupCalc.majo2 > 0 && (
-              <span>
-                +{heuresSup.tauxMajo2}% : {fmtHours(heuresSupCalc.majo2)}
-              </span>
-            )}
-            {heuresSupCalc.extraPaye > 0 && <span>Payé hors travail effectif : {fmtHours(heuresSupCalc.extraPaye)}</span>}
+        {(heuresSupCalc.normales > 0 || heuresSupCalc.majo1 > 0 || heuresSupCalc.majo2 > 0 || heuresSupCalc.extraPaye > 0) && (
+          <div className="text-xs mt-3 pt-3" style={{ borderTop: `1px solid ${PALETTE.line}`, color: "#6B6552" }}>
+            <div>{overtimeExplanation(heuresSupCalc.normales + heuresSupCalc.majo1 + heuresSupCalc.majo2, heuresSup)}</div>
+            {heuresSupCalc.extraPaye > 0 && <div className="mt-1">Payé hors travail effectif : {fmtHours(heuresSupCalc.extraPaye)}</div>}
           </div>
         )}
       </div>
@@ -4527,6 +4986,14 @@ function SyntheseHebdo({ employees, entries, heuresSup, heuresDefaut }) {
                       {fmtHours(semaines.reduce((s, w) => s + w.majo2, 0))}
                     </span>
                   </div>
+                  {heuresSup.mode === "mensuel" && (
+                    <div className="px-4 py-2 text-xs" style={{ color: "#8A8271" }}>
+                      {overtimeExplanation(
+                        semaines.reduce((s, w) => s + w.eff, 0),
+                        heuresSup
+                      )}
+                    </div>
+                  )}
                 </>
               )}
             </div>
@@ -4735,6 +5202,12 @@ function FeuillePointage({ employees, entries, heuresSup }) {
                   </div>
                 </div>
               </div>
+
+              {heuresSup.mode === "mensuel" && (
+                <p className="text-xs mb-4" style={{ color: "#8A8271" }}>
+                  {overtimeExplanation(totalEff, heuresSup)}
+                </p>
+              )}
 
               {/* Détail jour par jour */}
               <div style={{ background: PALETTE.card, border: `1px solid ${PALETTE.line}` }} className="rounded-md overflow-hidden">
