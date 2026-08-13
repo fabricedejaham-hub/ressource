@@ -92,6 +92,7 @@ const Award = mkIcon("🏆");
 const Table = mkIcon("▦");
 const ListChecks = mkIcon("☑");
 const Calendar = mkIcon("📆");
+const Layers = mkIcon("🗂");
 
 
 // ---------- Helpers ----------
@@ -139,19 +140,25 @@ const PALETTE = {
 
 // Seuils par défaut = Code du travail (à vérifier / ajuster selon avenants IDCC 9971)
 const DEFAULT_HS = {
-  mode: "hebdo", // "hebdo" (35h/semaine) ou "mensuel" (151,67h/mois)
+  mode: "mensualise", // "hebdo" (35h/semaine) / "mensualise" (151,67h fixe + sup hebdo, méthode légale par défaut) / "mensuel" (151,67h simplifié sur la période)
   base: "effectives", // "effectives" ou "payees" — quelle heure sert de base au calcul des heures sup
-  seuilNormal: 35, // heures/semaine avant majoration (mode hebdo)
-  seuilMajo2: 43, // heures/semaine à partir desquelles la 2e majoration s'applique (mode hebdo)
-  seuilNormalMensuel: 151.67, // heures/mois avant majoration (mode mensuel)
-  plageMajo1Mensuel: 34.67, // heures supplémentaires au taux 1 avant de passer au taux 2 (mode mensuel)
-  tauxMajo1: 25, // % de la 36e à la 43e heure (hebdo) / des 34,67 premières heures sup (mensuel)
+  seuilNormal: 35, // heures/semaine avant majoration (hebdo et mensualisé — les heures sup restent hebdomadaires)
+  seuilMajo2: 43, // heures/semaine à partir desquelles la 2e majoration s'applique (hebdo et mensualisé)
+  heuresBaseMensualisee: 151.67, // heures de base fixe payées chaque mois (mode mensualisé)
+  seuilNormalMensuel: 151.67, // heures/mois avant majoration (mode mensuel simplifié)
+  plageMajo1Mensuel: 34.67, // heures supplémentaires au taux 1 avant de passer au taux 2 (mode mensuel simplifié)
+  tauxMajo1: 25, // % de la 36e à la 43e heure (hebdo/mensualisé) / des 34,67 premières heures sup (mensuel simplifié)
   tauxMajo2: 50, // % au-delà
 };
 
 // Renvoie la valeur d'heures à utiliser comme base pour le calcul des heures sup,
 // selon le réglage choisi (heures effectives, ou heures payées)
 const overtimeBase = (hs, eff, paye) => ((hs && hs.base) === "payees" ? paye : eff);
+
+// Composante "heures normales" du brut : en mode mensualisé, c'est une base fixe (151,67h par défaut)
+// peu importe les heures réellement travaillées ce mois — comme sur une vraie fiche de paie française.
+// Dans les autres modes, ce sont les heures normales réellement calculées (variable selon la période).
+const baseComponent = (hs, r, normales) => ((hs && hs.mode) === "mensualise" ? Number(hs.heuresBaseMensualisee) * r : normales * r);
 
 // Date à utiliser pour savoir sur quelle période une avance/acompte/prêt/loyer est déduit du salaire.
 // Par défaut, c'est la date de l'opération elle-même — mais si une date de remboursement différente
@@ -314,19 +321,42 @@ const splitOvertime = (totalHeures, hs) => {
 };
 
 // Phrase explicative du calcul des heures sup, pour affichage à titre d'information à côté des totaux.
-// Prend le total d'heures (base choisie dans Paramètres) déjà regroupé sur la bonne période (semaine ou
-// période entière selon le mode), et détaille le seuil normal, puis chaque tranche de majoration atteinte.
-const overtimeExplanation = (total, hs) => {
+// Prend les heures normales/majorées DÉJÀ calculées (sommées correctement semaine par semaine si besoin),
+// et les met en phrase — ne refait jamais le calcul sur un total déjà cumulé, pour éviter de réappliquer
+// un seuil hebdomadaire à plusieurs semaines cumulées d'un coup (ce qui donnerait un résultat faux).
+const overtimeExplanation = (normales, majo1, majo2, hs) => {
   const mensuel = hs && hs.mode === "mensuel";
-  const s1 = mensuel ? Number(hs.seuilNormalMensuel) : Number(hs.seuilNormal);
-  const s2 = mensuel ? s1 + Number(hs.plageMajo1Mensuel) : Number(hs.seuilMajo2);
-  const { normales, majo1, majo2 } = splitOvertime(total, hs);
+  const mensualise = hs && hs.mode === "mensualise";
+  const total = normales + majo1 + majo2;
   const baseLabel = (hs && hs.base) === "payees" ? "payées" : "effectives";
-  const periodeLabel = mensuel ? "sur la période" : "sur la semaine";
-  const parts = [`${fmtHours(normales)} normales (jusqu'à ${s1}h)`];
-  if (majo1 > 0) parts.push(`${fmtHours(majo1)} à +${hs.tauxMajo1}% (de ${s1}h à ${s2}h)`);
-  if (majo2 > 0) parts.push(`${fmtHours(majo2)} à +${hs.tauxMajo2}% (au-delà de ${s2}h)`);
-  return `${fmtHours(total)} ${baseLabel} ${periodeLabel} = ${parts.join(" + ")}`;
+  const parts = [];
+
+  if (mensuel) {
+    const s1 = Number(hs.seuilNormalMensuel);
+    const s2 = s1 + Number(hs.plageMajo1Mensuel);
+    parts.push(`${fmtHours(normales)} normales (jusqu'à ${s1}h)`);
+    if (majo1 > 0) parts.push(`${fmtHours(majo1)} à +${hs.tauxMajo1}% (de ${s1}h à ${s2}h)`);
+    if (majo2 > 0) parts.push(`${fmtHours(majo2)} à +${hs.tauxMajo2}% (au-delà de ${s2}h)`);
+    return `${fmtHours(total)} ${baseLabel} sur la période = ${parts.join(" + ")}`;
+  }
+
+  // Hebdomadaire ou mensualisé : le calcul réel se fait semaine par semaine (seuil 35h), puis les
+  // heures normales/majorées de chaque semaine sont additionnées — on affiche ces totaux déjà justes,
+  // sans reprendre le calcul sur le cumul (qui donnerait un résultat faux si la période fait plusieurs semaines).
+  parts.push(`${fmtHours(normales)} normales`);
+  if (majo1 > 0) parts.push(`${fmtHours(majo1)} à +${hs.tauxMajo1}%`);
+  if (majo2 > 0) parts.push(`${fmtHours(majo2)} à +${hs.tauxMajo2}%`);
+  let note = ` (calcul fait semaine civile par semaine civile, seuil ${hs.seuilNormal}h)`;
+  if (mensualise) {
+    const forfait = Number(hs.heuresBaseMensualisee);
+    const depassement = Math.max(0, total - forfait);
+    note =
+      ` (calcul fait semaine civile par semaine civile, seuil ${hs.seuilNormal}h — base de ${forfait}h payée par` +
+      ` ailleurs). Repère indicatif : ${fmtHours(total)} au total ce mois, dont ${fmtHours(depassement)} au-delà` +
+      ` du forfait de ${forfait}h (ce repère ne sert qu'à titre indicatif — le montant réellement dû reste celui` +
+      ` calculé semaine par semaine ci-dessus, qui peut différer)`;
+  }
+  return `${fmtHours(total)} ${baseLabel} cumulées sur la période = ${parts.join(" + ")}${note}`;
 };
 
 // ---------- Main App ----------
@@ -550,6 +580,7 @@ function PointageApp() {
           <Primes employees={employees} primes={primes} updatePrimes={updatePrimes} primeTypes={primeTypes} updatePrimeTypes={updatePrimeTypes} />
         )}
         {tab === "recap" && <Recap employees={employees} entries={entries} />}
+        {tab === "syntheseTache" && <SyntheseParTache employees={employees} entries={entries} />}
         {tab === "synthese" && (
           <SyntheseSalarie
             employees={employees}
@@ -686,6 +717,7 @@ function TabBar({ tab, setTab }) {
     { id: "avances", label: "Avances", icon: Wallet },
     { id: "primes", label: "Primes", icon: Award },
     { id: "recap", label: "Récapitulatif", icon: BarChart3 },
+    { id: "syntheseTache", label: "Synthèse par tâche", icon: Layers },
     { id: "synthese", label: "Synthèse salarié", icon: FileText },
     { id: "syntheseHebdo", label: "Compte rendu hebdo", icon: Table },
     { id: "feuillePointage", label: "Feuille de pointage", icon: ListChecks },
@@ -2840,9 +2872,17 @@ function Parametres({
               style={{ borderColor: PALETTE.line }}
             >
               <option value="hebdo">Hebdomadaire (35h/semaine)</option>
-              <option value="mensuel">Mensuel (151,67h/mois)</option>
+              <option value="mensualise">Mensualisé (151,67h fixe + heures sup hebdo) — recommandé</option>
+              <option value="mensuel">Mensuel simplifié (151,67h sur la période)</option>
             </select>
           </div>
+          <p className="text-xs" style={{ color: "#8A8271" }}>
+            {heuresSup.mode === "mensualise"
+              ? "✓ Méthode légale française standard : un salaire de base fixe (151,67h) payé chaque mois, et les heures sup calculées semaine civile par semaine civile, ajoutées par-dessus."
+              : heuresSup.mode === "mensuel"
+              ? "⚠️ Ce mode compare directement le total d'heures de la période à un seuil mensuel — ce n'est pas la méthode légale (qui reste hebdomadaire), à réserver à une estimation rapide."
+              : "Heures normales et sup calculées semaine par semaine, sans base fixe — légal mais différent d'un vrai bulletin de paie mensualisé."}
+          </p>
 
           <div className="flex items-center justify-between gap-3">
             <label className="text-sm">Base de calcul</label>
@@ -2919,6 +2959,19 @@ function Parametres({
             </>
           ) : (
             <>
+              {heuresSup.mode === "mensualise" && (
+                <div className="flex items-center justify-between gap-3">
+                  <label className="text-sm">Base mensuelle fixe (h)</label>
+                  <input
+                    type="number"
+                    step="0.01"
+                    value={heuresSup.heuresBaseMensualisee}
+                    onChange={(e) => setHS({ heuresBaseMensualisee: e.target.value })}
+                    className="w-24 px-2 py-1.5 rounded border text-sm"
+                    style={{ borderColor: PALETTE.line }}
+                  />
+                </div>
+              )}
               <div className="flex items-center justify-between gap-3">
                 <label className="text-sm">Seuil hebdomadaire normal (h)</label>
                 <input
@@ -3127,13 +3180,21 @@ function HeuresSup({ employees, entries, heuresSup }) {
 
       <p className="text-xs mb-4" style={{ color: "#8A8271" }}>
         Seuils calculés sur les <strong>heures effectivement travaillées</strong> (pas les heures payées), par{" "}
-        {heuresSup.mode === "mensuel" ? "mois" : "semaine"} : normal jusqu'à{" "}
+        {heuresSup.mode === "mensuel" ? "mois (période choisie)" : "semaine"} : normal jusqu'à{" "}
         {heuresSup.mode === "mensuel" ? heuresSup.seuilNormalMensuel : heuresSup.seuilNormal}h, majoration{" "}
         {heuresSup.tauxMajo1}% sur les{" "}
         {heuresSup.mode === "mensuel"
           ? heuresSup.plageMajo1Mensuel
           : heuresSup.seuilMajo2 - heuresSup.seuilNormal}
         h suivantes, puis {heuresSup.tauxMajo2}% au-delà. Réglable dans Paramètres.
+        {heuresSup.mode === "mensualise" && (
+          <>
+            {" "}
+            En mode mensualisé, le montant « ≈ » ci-dessous ne montre que le surcoût des heures sup par semaine —
+            la base fixe de {heuresSup.heuresBaseMensualisee}h n'est comptée qu'une fois par mois dans Simulation
+            paie et Synthèse salarié.
+          </>
+        )}
       </p>
 
       {employees.length === 0 && <EmptyState text="Aucun salarié." />}
@@ -3153,8 +3214,10 @@ function HeuresSup({ employees, entries, heuresSup }) {
                 const { normales, majo1, majo2 } = splitOvertime(overtimeBase(heuresSup, eff, paye), heuresSup);
                 const extraPaye = heuresSup.base === "payees" ? 0 : Math.max(0, paye - eff);
                 const r = rate(emp);
+                // En mode mensualisé, la base fixe (151,67h) n'est comptée qu'une fois pour tout le mois
+                // (voir Simulation paie) — ici, par semaine, on n'affiche que le surcoût des heures sup.
                 const cost = r
-                  ? normales * r +
+                  ? (heuresSup.mode === "mensualise" ? 0 : normales * r) +
                     majo1 * r * (1 + heuresSup.tauxMajo1 / 100) +
                     majo2 * r * (1 + heuresSup.tauxMajo2 / 100) +
                     extraPaye * r
@@ -3190,7 +3253,7 @@ function HeuresSup({ employees, entries, heuresSup }) {
                       </span>
                     </div>
                     <div className="text-xs mt-1" style={{ color: "#8A8271" }}>
-                      {overtimeExplanation(normales + majo1 + majo2, heuresSup)}
+                      {overtimeExplanation(normales, majo1, majo2, heuresSup)}
                     </div>
                   </div>
                 );
@@ -3272,7 +3335,7 @@ function SimulationPaie({ employees, entries, transactions, primes, heuresSup, t
     const b = bruts[emp.id] || { normales: 0, majo1: 0, majo2: 0, extraPaye: 0 };
     const r = rate(emp);
     const brut = r
-      ? b.normales * r +
+      ? baseComponent(heuresSup, r, b.normales) +
         b.majo1 * r * (1 + heuresSup.tauxMajo1 / 100) +
         b.majo2 * r * (1 + heuresSup.tauxMajo2 / 100) +
         b.extraPaye * r
@@ -3418,9 +3481,15 @@ function SimulationPaie({ employees, entries, transactions, primes, heuresSup, t
               ) : (
                 <div className="text-xs space-y-1" style={{ color: "#6B6552" }}>
                   <div style={{ color: "#8A8271" }}>
-                    {overtimeExplanation(b.normales + b.majo1 + b.majo2, heuresSup)}
+                    {overtimeExplanation(b.normales, b.majo1, b.majo2, heuresSup)}
                     {b.extraPaye > 0 ? ` · +${fmtHours(b.extraPaye)} payées hors travail effectif` : ""}
                   </div>
+                  {heuresSup.mode === "mensualise" && (
+                    <div style={{ color: PALETTE.rust }}>
+                      Dépassement du forfait {heuresSup.heuresBaseMensualisee}h (indicatif) :{" "}
+                      <strong>{fmtHours(Math.max(0, b.normales + b.majo1 + b.majo2 - Number(heuresSup.heuresBaseMensualisee)))}</strong>
+                    </div>
+                  )}
                   <div className="flex justify-between pt-1" style={{ borderTop: `1px solid ${PALETTE.line}` }}>
                     <span>Brut estimé</span>
                     <strong>{fmtEuros(brut)}</strong>
@@ -3954,7 +4023,7 @@ function computeSyntheseData(emp, entries, transactions, primes, heuresSup, taux
 
   const r = Number(emp?.tauxHoraire) || 0;
   const brut = r
-    ? heuresSupCalc.normales * r +
+    ? baseComponent(heuresSup, r, heuresSupCalc.normales) +
       heuresSupCalc.majo1 * r * (1 + heuresSup.tauxMajo1 / 100) +
       heuresSupCalc.majo2 * r * (1 + heuresSup.tauxMajo2 / 100) +
       heuresSupCalc.extraPaye * r
@@ -4036,7 +4105,8 @@ function FicheSalarieContent({ emp, data, start, end, heuresSup, tauxCotisations
         <div className="flex items-center justify-between mb-2">
           <h3 className="font-semibold">Heures</h3>
           <span className="text-xs" style={{ color: "#8A8271" }}>
-            Heures sup : mode {heuresSup.mode === "mensuel" ? "mensuel" : "hebdomadaire"}
+            Heures sup : mode{" "}
+            {heuresSup.mode === "mensuel" ? "mensuel simplifié" : heuresSup.mode === "mensualise" ? "mensualisé" : "hebdomadaire"}
           </span>
         </div>
         <div className="grid grid-cols-2 gap-3 text-sm">
@@ -4066,10 +4136,20 @@ function FicheSalarieContent({ emp, data, start, end, heuresSup, tauxCotisations
               {fmtHours(heuresSupCalc.majo1 + heuresSupCalc.majo2)}
             </div>
           </div>
+          {heuresSup.mode === "mensualise" && (
+            <div>
+              <div style={{ color: "#8A8271" }} className="text-xs">
+                Dépassement du forfait {heuresSup.heuresBaseMensualisee}h (indicatif)
+              </div>
+              <div className="font-semibold" style={{ color: PALETTE.rust }}>
+                {fmtHours(Math.max(0, totalEff - Number(heuresSup.heuresBaseMensualisee)))}
+              </div>
+            </div>
+          )}
         </div>
         {(heuresSupCalc.normales > 0 || heuresSupCalc.majo1 > 0 || heuresSupCalc.majo2 > 0 || heuresSupCalc.extraPaye > 0) && (
           <div className="text-xs mt-3 pt-3" style={{ borderTop: `1px solid ${PALETTE.line}`, color: "#6B6552" }}>
-            <div>{overtimeExplanation(heuresSupCalc.normales + heuresSupCalc.majo1 + heuresSupCalc.majo2, heuresSup)}</div>
+            <div>{overtimeExplanation(heuresSupCalc.normales, heuresSupCalc.majo1, heuresSupCalc.majo2, heuresSup)}</div>
             {heuresSupCalc.extraPaye > 0 && <div className="mt-1">Payé hors travail effectif : {fmtHours(heuresSupCalc.extraPaye)}</div>}
           </div>
         )}
@@ -4525,7 +4605,7 @@ function Dashboard({ employees, entries, transactions, primes, heuresSup, tauxCo
     if (!b) return;
     const r = Number(emp.tauxHoraire) || 0;
     const brut = r
-      ? b.normales * r + b.majo1 * r * (1 + heuresSup.tauxMajo1 / 100) + b.majo2 * r * (1 + heuresSup.tauxMajo2 / 100) + b.extraPaye * r
+      ? baseComponent(heuresSup, r, b.normales) + b.majo1 * r * (1 + heuresSup.tauxMajo1 / 100) + b.majo2 * r * (1 + heuresSup.tauxMajo2 / 100) + b.extraPaye * r
       : 0;
     const congesMois = congesPayesMontant(emp, entries, heuresDefaut, monthStart, monthEnd);
     const primesMois = primes
@@ -4658,7 +4738,7 @@ function Dashboard({ employees, entries, transactions, primes, heuresSup, tauxCo
         });
         const r = Number(emp.tauxHoraire) || 0;
         const brut = r
-          ? normales * r + majo1 * r * (1 + heuresSup.tauxMajo1 / 100) + majo2 * r * (1 + heuresSup.tauxMajo2 / 100) + extraPaye * r
+          ? baseComponent(heuresSup, r, normales) + majo1 * r * (1 + heuresSup.tauxMajo1 / 100) + majo2 * r * (1 + heuresSup.tauxMajo2 / 100) + extraPaye * r
           : 0;
         total += brut - brut * (Number(tauxCotisations) / 100);
       });
@@ -4988,10 +5068,12 @@ function SyntheseHebdo({ employees, entries, heuresSup, heuresDefaut }) {
                   </div>
                   {heuresSup.mode === "mensuel" && (
                     <div className="px-4 py-2 text-xs" style={{ color: "#8A8271" }}>
-                      {overtimeExplanation(
-                        semaines.reduce((s, w) => s + w.eff, 0),
-                        heuresSup
-                      )}
+                      {(() => {
+                        const totEff = semaines.reduce((s, w) => s + w.eff, 0);
+                        const totMajo1 = semaines.reduce((s, w) => s + w.majo1, 0);
+                        const totMajo2 = semaines.reduce((s, w) => s + w.majo2, 0);
+                        return overtimeExplanation(totEff - totMajo1 - totMajo2, totMajo1, totMajo2, heuresSup);
+                      })()}
                     </div>
                   )}
                 </>
@@ -5205,7 +5287,7 @@ function FeuillePointage({ employees, entries, heuresSup }) {
 
               {heuresSup.mode === "mensuel" && (
                 <p className="text-xs mb-4" style={{ color: "#8A8271" }}>
-                  {overtimeExplanation(totalEff, heuresSup)}
+                  {overtimeExplanation(totalEff - majo1Total - majo2Total, majo1Total, majo2Total, heuresSup)}
                 </p>
               )}
 
@@ -5247,6 +5329,170 @@ function FeuillePointage({ employees, entries, heuresSup }) {
           );
         })}
       </div>
+    </div>
+  );
+}
+
+
+// ---------- Synthèse par jour et par tâche (qui a fait quoi, chaque jour) ----------
+function SyntheseParTache({ employees, entries }) {
+  const [start, setStart] = useState(() => {
+    const d = new Date();
+    d.setDate(1);
+    return d.toISOString().slice(0, 10);
+  });
+  const [end, setEnd] = useState(todayISO());
+
+  // Regroupe : date -> tâche -> liste de { nom, heuresEffectives, heuresPayees, parcelle }
+  const jours = useMemo(() => {
+    const map = {};
+    entries
+      .filter((e) => e.present && e.date >= start && e.date <= end)
+      .forEach((e) => {
+        if (!map[e.date]) map[e.date] = {};
+        if (!map[e.date][e.tache]) map[e.date][e.tache] = [];
+        const emp = employees.find((x) => x.id === e.employeeId);
+        map[e.date][e.tache].push({
+          nom: emp?.nom || "?",
+          heuresEffectives: Number(e.heuresEffectives || 0),
+          heuresPayees: Number(e.heuresPayees ?? e.heuresEffectives ?? 0),
+          parcelle: e.parcelle || "",
+        });
+      });
+    return Object.keys(map)
+      .sort()
+      .reverse()
+      .map((date) => ({
+        date,
+        taches: Object.keys(map[date])
+          .sort()
+          .map((tache) => ({ tache, salaries: map[date][tache] })),
+      }));
+  }, [entries, employees, start, end]);
+
+  const exportCSV = () => {
+    const rows = [["Date", "Tâche", "Salarié", "Heures effectives", "Heures payées", "Parcelle"]];
+    jours.forEach((j) => {
+      j.taches.forEach((t) => {
+        t.salaries.forEach((s) => {
+          rows.push([j.date, t.tache, s.nom, s.heuresEffectives.toFixed(2), s.heuresPayees.toFixed(2), s.parcelle]);
+        });
+      });
+    });
+    const csv = rows.map((r) => r.map((c) => `"${String(c ?? "").replace(/"/g, '""')}"`).join(",")).join("\n");
+    const blob = new Blob(["\uFEFF" + csv], { type: "text/csv;charset=utf-8;" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = `synthese_par_tache_${start}_${end}.csv`;
+    a.click();
+    URL.revokeObjectURL(url);
+  };
+
+  const exportPDF = () => window.print();
+
+  if (employees.length === 0) {
+    return <EmptyState text="Ajoutez d'abord vos salariés dans l'onglet « Salariés »." />;
+  }
+
+  return (
+    <div>
+      <div className="print-only mb-4">
+        <div className="font-bold text-lg">Synthèse par tâche — Habitation Ressource</div>
+        <div className="text-sm">
+          Du {start} au {end}
+        </div>
+      </div>
+
+      <div className="flex flex-wrap items-end gap-3 mb-6 no-print">
+        <div>
+          <label className="block text-xs mb-1" style={{ color: "#8A8271" }}>
+            Du
+          </label>
+          <input
+            type="date"
+            value={start}
+            onChange={(e) => setStart(e.target.value)}
+            className="px-2 py-2 rounded border text-sm"
+            style={{ borderColor: PALETTE.line }}
+          />
+        </div>
+        <div>
+          <label className="block text-xs mb-1" style={{ color: "#8A8271" }}>
+            Au
+          </label>
+          <input
+            type="date"
+            value={end}
+            onChange={(e) => setEnd(e.target.value)}
+            className="px-2 py-2 rounded border text-sm"
+            style={{ borderColor: PALETTE.line }}
+          />
+        </div>
+        <button
+          onClick={exportCSV}
+          style={{ background: PALETTE.green }}
+          className="px-4 py-2 rounded text-white text-sm font-medium flex items-center gap-1.5"
+        >
+          <Download size={16} /> CSV
+        </button>
+        <button
+          onClick={exportPDF}
+          style={{ background: PALETTE.rust }}
+          className="px-4 py-2 rounded text-white text-sm font-medium flex items-center gap-1.5"
+        >
+          <Download size={16} /> PDF
+        </button>
+      </div>
+
+      {jours.length === 0 ? (
+        <EmptyState text="Aucun pointage sur cette période." />
+      ) : (
+        <div className="space-y-4">
+          {jours.map((j) => (
+            <div key={j.date} style={{ background: PALETTE.card, border: `1px solid ${PALETTE.line}` }} className="rounded-md overflow-hidden">
+              <div
+                className="px-4 py-2.5 font-semibold text-sm capitalize"
+                style={{ background: PALETTE.greenDark, color: "#fff" }}
+              >
+                {fmtDateLong(j.date)}
+              </div>
+              <div>
+                {j.taches.map((t, i) => (
+                  <div key={t.tache} style={{ borderTop: i === 0 ? "none" : `1px solid ${PALETTE.line}` }}>
+                    <div className="px-4 py-2 font-medium text-sm" style={{ background: PALETTE.bg }}>
+                      {t.tache}{" "}
+                      <span style={{ color: "#8A8271" }} className="font-normal">
+                        ({t.salaries.length} salarié{t.salaries.length > 1 ? "s" : ""})
+                      </span>
+                    </div>
+                    <div className="px-4 py-1">
+                      {t.salaries.map((s, si) => (
+                        <div
+                          key={si}
+                          className="flex items-center justify-between py-1.5 text-sm"
+                          style={{ borderTop: si === 0 ? "none" : `1px solid ${PALETTE.line}` }}
+                        >
+                          <span>
+                            {s.nom}
+                            {s.parcelle ? <span style={{ color: "#8A8271" }}> · {s.parcelle}</span> : ""}
+                          </span>
+                          <span>
+                            <strong>{fmtHours(s.heuresEffectives)}</strong>
+                            {s.heuresPayees !== s.heuresEffectives && (
+                              <span style={{ color: PALETTE.rust }}> ({fmtHours(s.heuresPayees)} payées)</span>
+                            )}
+                          </span>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                ))}
+              </div>
+            </div>
+          ))}
+        </div>
+      )}
     </div>
   );
 }
