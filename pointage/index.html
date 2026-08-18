@@ -5344,39 +5344,51 @@ function SyntheseParTache({ employees, entries }) {
   const [end, setEnd] = useState(todayISO());
 
   // Regroupe : date -> tâche -> liste de { nom, heuresEffectives, heuresPayees, parcelle }
+  // et date -> liste des absences { nom, motif }
   const jours = useMemo(() => {
     const map = {};
+    const absMap = {};
     entries
-      .filter((e) => e.present && e.date >= start && e.date <= end)
+      .filter((e) => e.date >= start && e.date <= end)
       .forEach((e) => {
-        if (!map[e.date]) map[e.date] = {};
-        if (!map[e.date][e.tache]) map[e.date][e.tache] = [];
         const emp = employees.find((x) => x.id === e.employeeId);
-        map[e.date][e.tache].push({
-          nom: emp?.nom || "?",
-          heuresEffectives: Number(e.heuresEffectives || 0),
-          heuresPayees: Number(e.heuresPayees ?? e.heuresEffectives ?? 0),
-          parcelle: e.parcelle || "",
-        });
+        if (e.present) {
+          if (!map[e.date]) map[e.date] = {};
+          if (!map[e.date][e.tache]) map[e.date][e.tache] = [];
+          map[e.date][e.tache].push({
+            nom: emp?.nom || "?",
+            heuresEffectives: Number(e.heuresEffectives || 0),
+            heuresPayees: Number(e.heuresPayees ?? e.heuresEffectives ?? 0),
+            parcelle: e.parcelle || "",
+          });
+        } else {
+          if (!absMap[e.date]) absMap[e.date] = [];
+          absMap[e.date].push({ nom: emp?.nom || "?", motif: e.motif || "Non précisé" });
+        }
       });
-    return Object.keys(map)
+    const allDates = Array.from(new Set([...Object.keys(map), ...Object.keys(absMap)]));
+    return allDates
       .sort()
       .reverse()
       .map((date) => ({
         date,
-        taches: Object.keys(map[date])
+        taches: Object.keys(map[date] || {})
           .sort()
           .map((tache) => ({ tache, salaries: map[date][tache] })),
+        absences: (absMap[date] || []).sort((a, b) => a.nom.localeCompare(b.nom)),
       }));
   }, [entries, employees, start, end]);
 
   const exportCSV = () => {
-    const rows = [["Date", "Tâche", "Salarié", "Heures effectives", "Heures payées", "Parcelle"]];
+    const rows = [["Date", "Tâche / Absence", "Salarié", "Heures effectives", "Heures payées", "Parcelle"]];
     jours.forEach((j) => {
       j.taches.forEach((t) => {
         t.salaries.forEach((s) => {
           rows.push([j.date, t.tache, s.nom, s.heuresEffectives.toFixed(2), s.heuresPayees.toFixed(2), s.parcelle]);
         });
+      });
+      j.absences.forEach((a) => {
+        rows.push([j.date, `Absent (${a.motif})`, a.nom, "", "", ""]);
       });
     });
     const csv = rows.map((r) => r.map((c) => `"${String(c ?? "").replace(/"/g, '""')}"`).join(",")).join("\n");
@@ -5488,6 +5500,30 @@ function SyntheseParTache({ employees, entries }) {
                     </div>
                   </div>
                 ))}
+                {j.absences.length > 0 && (
+                  <div style={{ borderTop: j.taches.length > 0 ? `1px solid ${PALETTE.line}` : "none" }}>
+                    <div className="px-4 py-2 font-medium text-sm" style={{ background: "#FBF0E9" }}>
+                      Absences{" "}
+                      <span style={{ color: "#8A8271" }} className="font-normal">
+                        ({j.absences.length} salarié{j.absences.length > 1 ? "s" : ""})
+                      </span>
+                    </div>
+                    <div className="px-4 py-1">
+                      {j.absences.map((a, ai) => (
+                        <div
+                          key={ai}
+                          className="flex items-center justify-between py-1.5 text-sm"
+                          style={{ borderTop: ai === 0 ? "none" : `1px solid ${PALETTE.line}` }}
+                        >
+                          <span>{a.nom}</span>
+                          <span style={{ color: PALETTE.rust }} className="italic">
+                            {a.motif}
+                          </span>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                )}
               </div>
             </div>
           ))}
