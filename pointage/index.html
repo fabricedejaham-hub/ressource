@@ -93,6 +93,7 @@ const Table = mkIcon("▦");
 const ListChecks = mkIcon("☑");
 const Calendar = mkIcon("📆");
 const Layers = mkIcon("🗂");
+const Clock = mkIcon("🕐");
 
 
 // ---------- Helpers ----------
@@ -640,6 +641,9 @@ function PointageApp() {
           />
         )}
         {tab === "syntheseHebdo" && <SyntheseHebdo employees={employees} entries={entries} heuresSup={heuresSup} heuresDefaut={heuresDefaut} />}
+        {tab === "recapHeures" && (
+          <RecapHeures employees={employees} entries={entries} transactions={transactions} primes={primes} heuresSup={heuresSup} tauxCotisations={tauxCotisations} heuresDefaut={heuresDefaut} />
+        )}
         {tab === "feuillePointage" && <FeuillePointage employees={employees} entries={entries} heuresSup={heuresSup} />}
         {tab === "absences" && <Absences employees={employees} entries={entries} />}
         {tab === "conges" && (
@@ -766,6 +770,7 @@ function TabBar({ tab, setTab }) {
     { id: "recap", label: "Récapitulatif", icon: BarChart3 },
     { id: "syntheseTache", label: "Synthèse par tâche", icon: Layers },
     { id: "synthese", label: "Synthèse salarié", icon: FileText },
+    { id: "recapHeures", label: "Récap heures (151,67h)", icon: Clock },
     { id: "syntheseHebdo", label: "Compte rendu hebdo", icon: Table },
     { id: "feuillePointage", label: "Feuille de pointage", icon: ListChecks },
     { id: "absences", label: "Absences", icon: CalendarX },
@@ -5723,6 +5728,250 @@ function SyntheseParTache({ employees, entries }) {
           ))}
         </div>
       )}
+    </div>
+  );
+}
+
+
+// ---------- Récap heures simplifié (base 151,67h, sans le détail paie/avances) ----------
+function RecapHeures({ employees, entries, transactions, primes, heuresSup, tauxCotisations, heuresDefaut }) {
+  const [selectedIds, setSelectedIds] = useState([]);
+  const [start, setStart] = useState(() => {
+    const d = new Date();
+    d.setDate(1);
+    return d.toISOString().slice(0, 10);
+  });
+  const [end, setEnd] = useState(todayISO());
+
+  const employeesAffiches = selectedIds.length > 0 ? employees.filter((e) => selectedIds.includes(e.id)) : employees;
+
+  const toggleSelected = (id) => {
+    setSelectedIds((prev) => (prev.includes(id) ? prev.filter((x) => x !== id) : [...prev, id]));
+  };
+
+  const exportCSV = () => {
+    const rows = [
+      [
+        "Salarié",
+        "Salaire de base (h)",
+        "Salaire de base (€)",
+        "Absence non payée (h)",
+        "Absence non payée (€)",
+        "Congés payés (h)",
+        "Congés payés (€)",
+        "Heures normales 100% (h)",
+        "Heures normales 100% (€)",
+        `Heures sup +${heuresSup.tauxMajo1}% (h)`,
+        `Heures sup +${heuresSup.tauxMajo1}% (€)`,
+        `Heures sup +${heuresSup.tauxMajo2}% (h)`,
+        `Heures sup +${heuresSup.tauxMajo2}% (€)`,
+        "Total brut estimé (€)",
+      ],
+    ];
+    employeesAffiches.forEach((emp) => {
+      const data = computeSyntheseData(emp, entries, transactions, primes, heuresSup, tauxCotisations, heuresDefaut, start, end);
+      const r = Number(emp.tauxHoraire) || 0;
+      const montantBase = r ? Number(heuresSup.heuresBaseMensualisee) * r : 0;
+      const montantExcedent = r ? data.heuresExcedent * r : 0;
+      const montantMajo1 = r ? data.heuresSupCalc.majo1 * r * (1 + heuresSup.tauxMajo1 / 100) : 0;
+      const montantMajo2 = r ? data.heuresSupCalc.majo2 * r * (1 + heuresSup.tauxMajo2 / 100) : 0;
+      const montantAbsence = r ? data.retenueHeures * r : 0;
+      const montantConges = data.conges.montant || 0;
+      const total = montantBase + montantExcedent + montantMajo1 + montantMajo2 + montantConges - montantAbsence;
+      rows.push([
+        emp.nom,
+        data.heuresBase.toFixed(2),
+        montantBase.toFixed(2),
+        data.retenueHeures.toFixed(2),
+        montantAbsence > 0 ? `-${montantAbsence.toFixed(2)}` : "0.00",
+        data.conges.heures.toFixed(2),
+        montantConges.toFixed(2),
+        data.heuresExcedent.toFixed(2),
+        montantExcedent.toFixed(2),
+        data.heuresSupCalc.majo1.toFixed(2),
+        montantMajo1.toFixed(2),
+        data.heuresSupCalc.majo2.toFixed(2),
+        montantMajo2.toFixed(2),
+        r ? total.toFixed(2) : "",
+      ]);
+    });
+    const csv = rows.map((r) => r.map((c) => `"${String(c ?? "").replace(/"/g, '""')}"`).join(",")).join("\n");
+    const blob = new Blob(["\uFEFF" + csv], { type: "text/csv;charset=utf-8;" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = `recap_heures_${start}_${end}.csv`;
+    a.click();
+    URL.revokeObjectURL(url);
+  };
+
+  const exportPDF = () => window.print();
+
+  if (employees.length === 0) {
+    return <EmptyState text="Ajoutez d'abord vos salariés dans l'onglet « Salariés »." />;
+  }
+
+  return (
+    <div>
+      <div className="print-only mb-4">
+        <div className="font-bold text-lg">Récapitulatif des heures — Habitation Ressource</div>
+        <div className="text-sm">
+          Du {start} au {end}
+        </div>
+      </div>
+
+      <div className="flex flex-wrap items-end gap-3 mb-3 no-print">
+        <div>
+          <label className="block text-xs mb-1" style={{ color: "#8A8271" }}>
+            Du
+          </label>
+          <input
+            type="date"
+            value={start}
+            onChange={(e) => setStart(e.target.value)}
+            className="px-2 py-2 rounded border text-sm"
+            style={{ borderColor: PALETTE.line }}
+          />
+        </div>
+        <div>
+          <label className="block text-xs mb-1" style={{ color: "#8A8271" }}>
+            Au
+          </label>
+          <input
+            type="date"
+            value={end}
+            onChange={(e) => setEnd(e.target.value)}
+            className="px-2 py-2 rounded border text-sm"
+            style={{ borderColor: PALETTE.line }}
+          />
+        </div>
+        <button
+          onClick={exportCSV}
+          style={{ background: PALETTE.green }}
+          className="px-4 py-2 rounded text-white text-sm font-medium flex items-center gap-1.5"
+        >
+          <Download size={16} /> CSV
+        </button>
+        <button
+          onClick={exportPDF}
+          style={{ background: PALETTE.rust }}
+          className="px-4 py-2 rounded text-white text-sm font-medium flex items-center gap-1.5"
+        >
+          <Download size={16} /> PDF
+        </button>
+      </div>
+
+      {heuresSup.mode !== "mensualise" && (
+        <p className="text-xs mb-4" style={{ color: PALETTE.rust }}>
+          ⚠️ Le mode de calcul actif n'est pas « Mensualisé » (Paramètres → Heures supplémentaires) — la ligne «
+          Salaire de base 151,67h » ne s'applique qu'à ce mode. Changez de mode pour que ce récap ait un sens.
+        </p>
+      )}
+
+      <div className="flex flex-wrap gap-2 mb-6 no-print">
+        {employees.map((e) => {
+          const checked = selectedIds.includes(e.id);
+          return (
+            <button
+              key={e.id}
+              onClick={() => toggleSelected(e.id)}
+              className="px-3 py-1.5 rounded-full text-xs border"
+              style={{
+                borderColor: checked ? PALETTE.green : PALETTE.line,
+                background: checked ? PALETTE.green : "#fff",
+                color: checked ? "#fff" : PALETTE.ink,
+              }}
+            >
+              {e.nom}
+            </button>
+          );
+        })}
+        {selectedIds.length > 0 && (
+          <button onClick={() => setSelectedIds([])} className="text-xs underline" style={{ color: "#8A8271" }}>
+            Tout désélectionner
+          </button>
+        )}
+      </div>
+
+      <div className="space-y-3">
+        {employeesAffiches.map((emp) => {
+          const data = computeSyntheseData(emp, entries, transactions, primes, heuresSup, tauxCotisations, heuresDefaut, start, end);
+          const r = Number(emp.tauxHoraire) || 0;
+          const montantBase = r ? Number(heuresSup.heuresBaseMensualisee) * r : null;
+          const montantExcedent = r ? data.heuresExcedent * r : null;
+          const montantMajo1 = r ? data.heuresSupCalc.majo1 * r * (1 + heuresSup.tauxMajo1 / 100) : null;
+          const montantMajo2 = r ? data.heuresSupCalc.majo2 * r * (1 + heuresSup.tauxMajo2 / 100) : null;
+          const montantAbsence = r ? data.retenueHeures * r : null;
+          const montantConges = data.conges.montant || null;
+          const total =
+            (montantBase || 0) +
+            (montantExcedent || 0) +
+            (montantMajo1 || 0) +
+            (montantMajo2 || 0) +
+            (montantConges || 0) -
+            (montantAbsence || 0);
+          return (
+            <div key={emp.id} style={{ background: PALETTE.card, border: `1px solid ${PALETTE.line}` }} className="rounded-md overflow-hidden">
+              <div className="px-4 py-2.5 font-medium text-sm" style={{ background: PALETTE.bg, borderBottom: `1px solid ${PALETTE.line}` }}>
+                {emp.nom}
+              </div>
+              <div className="px-4 py-3 text-sm space-y-1.5">
+                <div className="flex justify-between">
+                  <span>Salaire de base</span>
+                  <span className="flex gap-3">
+                    <span>{fmtHoursDecimal(heuresSup.heuresBaseMensualisee)}</span>
+                    <strong className="w-20 text-right">{montantBase !== null ? fmtEuros(montantBase) : "—"}</strong>
+                  </span>
+                </div>
+                <div className="flex justify-between">
+                  <span>Heures normales 100%</span>
+                  <span className="flex gap-3">
+                    <span>{data.heuresExcedent > 0 ? fmtHours(data.heuresExcedent) : "—"}</span>
+                    <strong className="w-20 text-right">{data.heuresExcedent > 0 && montantExcedent !== null ? fmtEuros(montantExcedent) : "—"}</strong>
+                  </span>
+                </div>
+                <div className="flex justify-between">
+                  <span>Heures supplémentaires +{heuresSup.tauxMajo1}%</span>
+                  <span className="flex gap-3" style={{ color: data.heuresSupCalc.majo1 > 0 ? PALETTE.rust : "inherit" }}>
+                    <span>{data.heuresSupCalc.majo1 > 0 ? fmtHours(data.heuresSupCalc.majo1) : "—"}</span>
+                    <strong className="w-20 text-right">{data.heuresSupCalc.majo1 > 0 && montantMajo1 !== null ? fmtEuros(montantMajo1) : "—"}</strong>
+                  </span>
+                </div>
+                <div className="flex justify-between">
+                  <span>Heures supplémentaires +{heuresSup.tauxMajo2}%</span>
+                  <span className="flex gap-3" style={{ color: data.heuresSupCalc.majo2 > 0 ? PALETTE.rust : "inherit" }}>
+                    <span>{data.heuresSupCalc.majo2 > 0 ? fmtHours(data.heuresSupCalc.majo2) : "—"}</span>
+                    <strong className="w-20 text-right">{data.heuresSupCalc.majo2 > 0 && montantMajo2 !== null ? fmtEuros(montantMajo2) : "—"}</strong>
+                  </span>
+                </div>
+                <div className="flex justify-between">
+                  <span>Absences</span>
+                  <span className="flex gap-3" style={{ color: data.retenueHeures > 0 ? PALETTE.rust : "inherit" }}>
+                    <span>{data.retenueHeures > 0 ? `${fmtHours(data.retenueHeures)} (${data.joursAbsenceNonPayee} j)` : "—"}</span>
+                    <strong className="w-20 text-right">
+                      {data.retenueHeures > 0 && montantAbsence !== null ? `− ${fmtEuros(montantAbsence)}` : "—"}
+                    </strong>
+                  </span>
+                </div>
+                <div className="flex justify-between">
+                  <span>Congés payés</span>
+                  <span className="flex gap-3" style={{ color: data.conges.montant > 0 ? PALETTE.green : "inherit" }}>
+                    <span>{data.conges.jours > 0 ? `${fmtHours(data.conges.heures)} (${data.conges.jours} j)` : "—"}</span>
+                    <strong className="w-20 text-right">{data.conges.jours > 0 && montantConges !== null ? fmtEuros(montantConges) : "—"}</strong>
+                  </span>
+                </div>
+                <div
+                  className="flex justify-between pt-2 mt-1 font-semibold"
+                  style={{ borderTop: `1px solid ${PALETTE.line}`, color: PALETTE.green }}
+                >
+                  <span>Total brut estimé</span>
+                  <strong>{r ? fmtEuros(total) : "—"}</strong>
+                </div>
+              </div>
+            </div>
+          );
+        })}
+      </div>
     </div>
   );
 }
