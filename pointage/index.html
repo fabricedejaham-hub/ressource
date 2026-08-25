@@ -200,10 +200,11 @@ const baseMensuelleAjustee = (emp, entries, start, end, heuresBaseMensualisee, h
 };
 
 // Découpe les heures normales (effectives + hors travail effectif, hors majorations) en une ligne
-// "base" et une ligne "excédent", sans jamais compter plus d'heures que réellement dues — la base
-// affichée ne dépasse jamais ce qui a été effectivement travaillé/payé.
+// "base" (toujours la base ajustée, garantie chaque mois — c'est le principe même de la
+// mensualisation) et une ligne "excédent" pour ce qui dépasse. La base n'est jamais plafonnée par
+// l'activité réelle du mois : elle n'est réduite que pour une vraie absence non payée enregistrée.
 const splitBaseEtExcedent = (totalNormales, baseAjustee) => {
-  const base = Math.min(totalNormales, baseAjustee);
+  const base = baseAjustee;
   const excedent = Math.max(0, totalNormales - base);
   return { base, excedent };
 };
@@ -3387,26 +3388,31 @@ function SimulationPaie({ employees, entries, transactions, primes, heuresSup, t
     const b = bruts[emp.id] || { normales: 0, majo1: 0, majo2: 0, extraPaye: 0 };
     const r = rate(emp);
     const mensualise = heuresSup.mode === "mensualise";
+    const conges = congesPayesMontant(emp, entries, heuresDefaut, start, end);
     const { joursAbsenceNonPayee, retenueHeures } = mensualise
       ? absenceRetenueInfo(emp, entries, start, end, heuresDefaut)
       : { joursAbsenceNonPayee: 0, retenueHeures: 0 };
     const baseAjustee = mensualise ? Math.max(0, Number(heuresSup.heuresBaseMensualisee) - retenueHeures) : 0;
+    // En mode mensualisé, les jours de congé payé comptent comme des heures normales pour ne pas
+    // faire artificiellement chuter la base (sinon la ligne "heures non travaillées" les compterait
+    // comme un manque, alors que l'indemnité congés payés viendrait les rajouter séparément —
+    // double comptage). Les congés payés sont donc inclus ici, et ne sont plus ajoutés à part.
     const { base: heuresBase, excedent: heuresExcedent } = mensualise
-      ? splitBaseEtExcedent(b.normales + b.extraPaye, baseAjustee)
+      ? splitBaseEtExcedent(b.normales + b.extraPaye + conges.heures, baseAjustee)
       : { base: 0, excedent: 0 };
     const brut = r
-      ? (mensualise ? (heuresBase + heuresExcedent) * r : b.normales * r + b.extraPaye * r) +
+      ? (mensualise ? (heuresBase + heuresExcedent) * r : b.normales * r + b.extraPaye * r + conges.montant) +
         b.majo1 * r * (1 + heuresSup.tauxMajo1 / 100) +
         b.majo2 * r * (1 + heuresSup.tauxMajo2 / 100)
       : 0;
-    const conges = congesPayesMontant(emp, entries, heuresDefaut, start, end);
     const primesMontant = primesParEmp[emp.id] || 0;
-    // Les indemnités de congés payés et les primes sont soumises aux cotisations, comme le salaire normal
-    const cotisations = (brut + conges.montant + primesMontant) * (Number(tauxCotisations) / 100);
+    // Les primes sont soumises aux cotisations, comme le salaire normal (les congés payés le sont
+    // aussi mais sont déjà inclus dans "brut" en mode mensualisé — ou ajoutés ci-dessous sinon)
+    const cotisations = (brut + (mensualise ? 0 : conges.montant) + primesMontant) * (Number(tauxCotisations) / 100);
     const m = mouvements[emp.id] || { avance: 0, acompte: 0, pret: 0, remboursement: 0, loyer: 0 };
     const loyerAuto = loyerPourPeriode(emp, start, end);
     const deductions = m.avance + m.acompte + m.remboursement + loyerAuto;
-    const net = brut - cotisations - deductions + primesMontant + conges.montant;
+    const net = brut - cotisations - deductions + primesMontant + (mensualise ? 0 : conges.montant);
     return {
       emp,
       b,
@@ -3571,10 +3577,12 @@ function SimulationPaie({ employees, entries, transactions, primes, heuresSup, t
                           <span>{fmtHours(retenueHeures)}</span>
                         </div>
                       )}
-                      {Math.max(0, Number(heuresSup.heuresBaseMensualisee) - retenueHeures - heuresBase) > 0.01 && (
-                        <div className="flex justify-between" style={{ color: PALETTE.rust }}>
-                          <span>− Heures non travaillées sur la période</span>
-                          <span>{fmtHours(Math.max(0, Number(heuresSup.heuresBaseMensualisee) - retenueHeures - heuresBase))}</span>
+                      {conges.jours > 0 && (
+                        <div className="flex justify-between" style={{ color: "#8A8271" }}>
+                          <span>dont congés payés inclus dans la base</span>
+                          <span>
+                            {conges.jours} j ({fmtHours(conges.heures)})
+                          </span>
                         </div>
                       )}
                       {heuresExcedent > 0 && (
@@ -3634,7 +3642,7 @@ function SimulationPaie({ employees, entries, transactions, primes, heuresSup, t
                       <strong>{fmtEuros(loyerAuto)}</strong>
                     </div>
                   )}
-                  {conges.montant > 0 && (
+                  {heuresSup.mode !== "mensualise" && conges.montant > 0 && (
                     <div className="flex justify-between" style={{ color: PALETTE.green }}>
                       <span>+ Congés payés ({conges.jours} j, maintien de salaire)</span>
                       <strong>{fmtEuros(conges.montant)}</strong>
@@ -4135,29 +4143,34 @@ function computeSyntheseData(emp, entries, transactions, primes, heuresSup, taux
 
   const r = Number(emp?.tauxHoraire) || 0;
   const mensualise = heuresSup.mode === "mensualise";
+  const conges = congesPayesMontant(emp, entries, heuresDefaut, start, end);
   const { joursAbsenceNonPayee, retenueHeures } = mensualise
     ? absenceRetenueInfo(emp, entries, start, end, heuresDefaut)
     : { joursAbsenceNonPayee: 0, retenueHeures: 0 };
   const baseAjustee = mensualise ? Math.max(0, Number(heuresSup.heuresBaseMensualisee) - retenueHeures) : 0;
+  // En mode mensualisé, les congés payés comptent comme des heures normales dans la base (voir la
+  // note détaillée dans SimulationPaie) — pas ajoutés une seconde fois séparément.
   const { base: heuresBase, excedent: heuresExcedent } = mensualise
-    ? splitBaseEtExcedent(heuresSupCalc.normales + heuresSupCalc.extraPaye, baseAjustee)
+    ? splitBaseEtExcedent(heuresSupCalc.normales + heuresSupCalc.extraPaye + conges.heures, baseAjustee)
     : { base: 0, excedent: 0 };
   const brut = r
-    ? (mensualise ? (heuresBase + heuresExcedent) * r : heuresSupCalc.normales * r + heuresSupCalc.extraPaye * r) +
+    ? (mensualise
+        ? (heuresBase + heuresExcedent) * r
+        : heuresSupCalc.normales * r + heuresSupCalc.extraPaye * r + conges.montant) +
       heuresSupCalc.majo1 * r * (1 + heuresSup.tauxMajo1 / 100) +
       heuresSupCalc.majo2 * r * (1 + heuresSup.tauxMajo2 / 100)
     : 0;
-  const conges = congesPayesMontant(emp, entries, heuresDefaut, start, end);
   const primesPeriode = primes.filter((p) => p.employeeId === employeeId && p.date >= start && p.date <= end);
   const primesMontant = primesPeriode.reduce((s, p) => s + p.montant, 0);
-  // Les indemnités de congés payés et les primes sont soumises aux cotisations, comme le salaire normal
-  const cotisations = (brut + conges.montant + primesMontant) * (Number(tauxCotisations) / 100);
+  // Les primes sont soumises aux cotisations comme le salaire normal (les congés payés le sont
+  // aussi mais sont déjà inclus dans "brut" en mode mensualisé — ou ajoutés ci-dessous sinon)
+  const cotisations = (brut + (mensualise ? 0 : conges.montant) + primesMontant) * (Number(tauxCotisations) / 100);
   const avancesPeriode = mouvementsPeriode.filter((t) => t.type === "avance").reduce((s, t) => s + t.montant, 0);
   const acomptesPeriode = mouvementsPeriode.filter((t) => t.type === "acompte").reduce((s, t) => s + t.montant, 0);
   const remboursementsPeriode = mouvementsPeriode.filter((t) => t.type === "remboursement").reduce((s, t) => s + t.montant, 0);
   const loyerPeriode = loyerPourPeriode(emp, start, end);
   const deductionsPeriode = avancesPeriode + acomptesPeriode + remboursementsPeriode + loyerPeriode;
-  const net = brut - cotisations - deductionsPeriode + primesMontant + conges.montant;
+  const net = brut - cotisations - deductionsPeriode + primesMontant + (mensualise ? 0 : conges.montant);
 
   return {
     presences,
@@ -4369,10 +4382,12 @@ function FicheSalarieContent({ emp, data, start, end, heuresSup, tauxCotisations
                     <span>{fmtHours(retenueHeures)}</span>
                   </div>
                 )}
-                {Math.max(0, Number(heuresSup.heuresBaseMensualisee) - retenueHeures - heuresBase) > 0.01 && (
-                  <div className="flex justify-between" style={{ color: PALETTE.rust }}>
-                    <span>− Heures non travaillées sur la période</span>
-                    <span>{fmtHours(Math.max(0, Number(heuresSup.heuresBaseMensualisee) - retenueHeures - heuresBase))}</span>
+                {conges.jours > 0 && (
+                  <div className="flex justify-between" style={{ color: "#8A8271" }}>
+                    <span>dont congés payés inclus dans la base</span>
+                    <span>
+                      {conges.jours} j ({fmtHours(conges.heures)})
+                    </span>
                   </div>
                 )}
                 {heuresExcedent > 0 && (
@@ -4427,7 +4442,7 @@ function FicheSalarieContent({ emp, data, start, end, heuresSup, tauxCotisations
                 <strong>{fmtEuros(loyerPeriode)}</strong>
               </div>
             )}
-            {conges.montant > 0 && (
+            {heuresSup.mode !== "mensualise" && conges.montant > 0 && (
               <div className="flex justify-between" style={{ color: PALETTE.green }}>
                 <span>+ Congés payés ({conges.jours} j, maintien de salaire)</span>
                 <strong>{fmtEuros(conges.montant)}</strong>
@@ -4762,22 +4777,22 @@ function Dashboard({ employees, entries, transactions, primes, heuresSup, tauxCo
     if (!b) return;
     const r = Number(emp.tauxHoraire) || 0;
     const mensualiseD = heuresSup.mode === "mensualise";
+    const congesMois = congesPayesMontant(emp, entries, heuresDefaut, monthStart, monthEnd);
     const baseAjusteeD = mensualiseD ? baseMensuelleAjustee(emp, entries, monthStart, monthEnd, heuresSup.heuresBaseMensualisee, heuresDefaut) : 0;
     const { base: baseD, excedent: excedentD } = mensualiseD
-      ? splitBaseEtExcedent(b.normales + b.extraPaye, baseAjusteeD)
+      ? splitBaseEtExcedent(b.normales + b.extraPaye + congesMois.heures, baseAjusteeD)
       : { base: 0, excedent: 0 };
     const brut = r
-      ? (mensualiseD ? (baseD + excedentD) * r : b.normales * r + b.extraPaye * r) +
+      ? (mensualiseD ? (baseD + excedentD) * r : b.normales * r + b.extraPaye * r + congesMois.montant) +
         b.majo1 * r * (1 + heuresSup.tauxMajo1 / 100) +
         b.majo2 * r * (1 + heuresSup.tauxMajo2 / 100)
       : 0;
-    const congesMois = congesPayesMontant(emp, entries, heuresDefaut, monthStart, monthEnd);
     const primesMois = primes
       .filter((p) => p.employeeId === emp.id && p.date >= monthStart && p.date <= monthEnd)
       .reduce((s, p) => s + p.montant, 0);
-    const net = brut - (brut + congesMois.montant + primesMois) * (Number(tauxCotisations) / 100);
+    const net = brut - (brut + (mensualiseD ? 0 : congesMois.montant) + primesMois) * (Number(tauxCotisations) / 100);
     const loyerMois = loyerPourPeriode(emp, monthStart, monthEnd);
-    masseSalariale += net + primesMois - loyerMois + congesMois.montant;
+    masseSalariale += net + primesMois - loyerMois + (mensualiseD ? 0 : congesMois.montant);
     heuresMajo1Total += b.majo1;
     heuresMajo2Total += b.majo2;
   });
@@ -4902,12 +4917,13 @@ function Dashboard({ employees, entries, transactions, primes, heuresSup, tauxCo
         });
         const r = Number(emp.tauxHoraire) || 0;
         const mensualiseC = heuresSup.mode === "mensualise";
+        const congesC = congesPayesMontant(emp, entries, heuresDefaut, mStart, mEnd);
         const baseAjusteeC = mensualiseC ? baseMensuelleAjustee(emp, entries, mStart, mEnd, heuresSup.heuresBaseMensualisee, heuresDefaut) : 0;
         const { base: baseC, excedent: excedentC } = mensualiseC
-          ? splitBaseEtExcedent(normales + extraPaye, baseAjusteeC)
+          ? splitBaseEtExcedent(normales + extraPaye + congesC.heures, baseAjusteeC)
           : { base: 0, excedent: 0 };
         const brut = r
-          ? (mensualiseC ? (baseC + excedentC) * r : normales * r + extraPaye * r) +
+          ? (mensualiseC ? (baseC + excedentC) * r : normales * r + extraPaye * r + congesC.montant) +
             majo1 * r * (1 + heuresSup.tauxMajo1 / 100) +
             majo2 * r * (1 + heuresSup.tauxMajo2 / 100)
           : 0;
@@ -5757,8 +5773,7 @@ function RecapHeures({ employees, entries, transactions, primes, heuresSup, taux
         "Salaire de base (€)",
         "Absence non payée (h)",
         "Absence non payée (€)",
-        "Congés payés (h)",
-        "Congés payés (€)",
+        "Congés payés inclus (h)",
         "Heures normales 100% (h)",
         "Heures normales 100% (€)",
         `Heures sup +${heuresSup.tauxMajo1}% (h)`,
@@ -5776,8 +5791,9 @@ function RecapHeures({ employees, entries, transactions, primes, heuresSup, taux
       const montantMajo1 = r ? data.heuresSupCalc.majo1 * r * (1 + heuresSup.tauxMajo1 / 100) : 0;
       const montantMajo2 = r ? data.heuresSupCalc.majo2 * r * (1 + heuresSup.tauxMajo2 / 100) : 0;
       const montantAbsence = r ? data.retenueHeures * r : 0;
-      const montantConges = data.conges.montant || 0;
-      const total = montantBase + montantExcedent + montantMajo1 + montantMajo2 + montantConges - montantAbsence;
+      // Le total réel se limite à (base + excédent) + heures sup — les congés payés sont déjà
+      // comptés dans "base + excédent", pas ajoutés une seconde fois.
+      const total = r ? (data.heuresBase + data.heuresExcedent) * r + montantMajo1 + montantMajo2 : 0;
       rows.push([
         emp.nom,
         data.heuresBase.toFixed(2),
@@ -5785,7 +5801,6 @@ function RecapHeures({ employees, entries, transactions, primes, heuresSup, taux
         data.retenueHeures.toFixed(2),
         montantAbsence > 0 ? `-${montantAbsence.toFixed(2)}` : "0.00",
         data.conges.heures.toFixed(2),
-        montantConges.toFixed(2),
         data.heuresExcedent.toFixed(2),
         montantExcedent.toFixed(2),
         data.heuresSupCalc.majo1.toFixed(2),
@@ -5897,19 +5912,14 @@ function RecapHeures({ employees, entries, transactions, primes, heuresSup, taux
         {employeesAffiches.map((emp) => {
           const data = computeSyntheseData(emp, entries, transactions, primes, heuresSup, tauxCotisations, heuresDefaut, start, end);
           const r = Number(emp.tauxHoraire) || 0;
-          const montantBase = r ? Number(heuresSup.heuresBaseMensualisee) * r : null;
+          const montantBaseNominal = r ? Number(heuresSup.heuresBaseMensualisee) * r : null;
           const montantExcedent = r ? data.heuresExcedent * r : null;
           const montantMajo1 = r ? data.heuresSupCalc.majo1 * r * (1 + heuresSup.tauxMajo1 / 100) : null;
           const montantMajo2 = r ? data.heuresSupCalc.majo2 * r * (1 + heuresSup.tauxMajo2 / 100) : null;
           const montantAbsence = r ? data.retenueHeures * r : null;
-          const montantConges = data.conges.montant || null;
-          const total =
-            (montantBase || 0) +
-            (montantExcedent || 0) +
-            (montantMajo1 || 0) +
-            (montantMajo2 || 0) +
-            (montantConges || 0) -
-            (montantAbsence || 0);
+          // Le brut réel se limite à (base + excédent), les congés payés étant déjà comptés dedans
+          // (voir Simulation paie pour le détail) — pas ajoutés une seconde fois ici.
+          const total = r ? (data.heuresBase + data.heuresExcedent) * r + (montantMajo1 || 0) + (montantMajo2 || 0) : 0;
           return (
             <div key={emp.id} style={{ background: PALETTE.card, border: `1px solid ${PALETTE.line}` }} className="rounded-md overflow-hidden">
               <div className="px-4 py-2.5 font-medium text-sm" style={{ background: PALETTE.bg, borderBottom: `1px solid ${PALETTE.line}` }}>
@@ -5920,9 +5930,27 @@ function RecapHeures({ employees, entries, transactions, primes, heuresSup, taux
                   <span>Salaire de base</span>
                   <span className="flex gap-3">
                     <span>{fmtHoursDecimal(heuresSup.heuresBaseMensualisee)}</span>
-                    <strong className="w-20 text-right">{montantBase !== null ? fmtEuros(montantBase) : "—"}</strong>
+                    <strong className="w-20 text-right">{montantBaseNominal !== null ? fmtEuros(montantBaseNominal) : "—"}</strong>
                   </span>
                 </div>
+                {data.retenueHeures > 0 && (
+                  <div className="flex justify-between" style={{ color: PALETTE.rust }}>
+                    <span>Absences ({data.joursAbsenceNonPayee} j)</span>
+                    <span className="flex gap-3">
+                      <span>− {fmtHours(data.retenueHeures)}</span>
+                      <strong className="w-20 text-right">{montantAbsence !== null ? `− ${fmtEuros(montantAbsence)}` : "—"}</strong>
+                    </span>
+                  </div>
+                )}
+                {data.conges.jours > 0 && (
+                  <div className="flex justify-between" style={{ color: "#8A8271" }}>
+                    <span>dont congés payés ({data.conges.jours} j)</span>
+                    <span className="flex gap-3">
+                      <span>{fmtHours(data.conges.heures)}</span>
+                      <span className="w-20 text-right italic">inclus</span>
+                    </span>
+                  </div>
+                )}
                 <div className="flex justify-between">
                   <span>Heures normales 100%</span>
                   <span className="flex gap-3">
@@ -5942,22 +5970,6 @@ function RecapHeures({ employees, entries, transactions, primes, heuresSup, taux
                   <span className="flex gap-3" style={{ color: data.heuresSupCalc.majo2 > 0 ? PALETTE.rust : "inherit" }}>
                     <span>{data.heuresSupCalc.majo2 > 0 ? fmtHours(data.heuresSupCalc.majo2) : "—"}</span>
                     <strong className="w-20 text-right">{data.heuresSupCalc.majo2 > 0 && montantMajo2 !== null ? fmtEuros(montantMajo2) : "—"}</strong>
-                  </span>
-                </div>
-                <div className="flex justify-between">
-                  <span>Absences</span>
-                  <span className="flex gap-3" style={{ color: data.retenueHeures > 0 ? PALETTE.rust : "inherit" }}>
-                    <span>{data.retenueHeures > 0 ? `${fmtHours(data.retenueHeures)} (${data.joursAbsenceNonPayee} j)` : "—"}</span>
-                    <strong className="w-20 text-right">
-                      {data.retenueHeures > 0 && montantAbsence !== null ? `− ${fmtEuros(montantAbsence)}` : "—"}
-                    </strong>
-                  </span>
-                </div>
-                <div className="flex justify-between">
-                  <span>Congés payés</span>
-                  <span className="flex gap-3" style={{ color: data.conges.montant > 0 ? PALETTE.green : "inherit" }}>
-                    <span>{data.conges.jours > 0 ? `${fmtHours(data.conges.heures)} (${data.conges.jours} j)` : "—"}</span>
-                    <strong className="w-20 text-right">{data.conges.jours > 0 && montantConges !== null ? fmtEuros(montantConges) : "—"}</strong>
                   </span>
                 </div>
                 <div
