@@ -175,6 +175,19 @@ const countJoursOuvres = (start, end) => {
   return count;
 };
 
+// Proratise la base mensuelle si la période dépasse la date d'embauche ou la date de fin de contrat
+// du salarié (ex: entrée le 11 du mois → pas de base complète payée pour les jours avant son arrivée).
+const baseNominaleProratisee = (emp, start, end, heuresBaseMensualisee) => {
+  const finContrat = (emp.typeContrat === "CDD" || emp.typeContrat === "Saisonnier") && emp.dateFinContrat ? emp.dateFinContrat : null;
+  const effectiveStart = emp.dateDebutContrat && emp.dateDebutContrat > start ? emp.dateDebutContrat : start;
+  const effectiveEnd = finContrat && finContrat < end ? finContrat : end;
+  if (effectiveStart > effectiveEnd) return 0;
+  const joursOuvresTotal = countJoursOuvres(start, end);
+  if (joursOuvresTotal === 0) return 0;
+  const joursOuvresEffectifs = countJoursOuvres(effectiveStart, effectiveEnd);
+  return Number(heuresBaseMensualisee) * (joursOuvresEffectifs / joursOuvresTotal);
+};
+
 // Base mensuelle (151,67h par défaut) réduite au prorata des jours d'absence NON payée sur la période
 // (le congé payé n'entre pas dans cette retenue, il est déjà rémunéré séparément ailleurs)
 const absenceRetenueInfo = (emp, entries, start, end, heuresDefaut) => {
@@ -195,8 +208,9 @@ const absenceRetenueInfo = (emp, entries, start, end, heuresDefaut) => {
 };
 
 const baseMensuelleAjustee = (emp, entries, start, end, heuresBaseMensualisee, heuresDefaut) => {
+  const baseNominale = baseNominaleProratisee(emp, start, end, heuresBaseMensualisee);
   const { retenueHeures } = absenceRetenueInfo(emp, entries, start, end, heuresDefaut);
-  return Math.max(0, Number(heuresBaseMensualisee) - retenueHeures);
+  return Math.max(0, baseNominale - retenueHeures);
 };
 
 // Découpe les heures normales (effectives + hors travail effectif, hors majorations) en une ligne
@@ -1633,7 +1647,7 @@ function Salaries({ employees, updateEmployees }) {
     if (!nom.trim()) return;
     updateEmployees([
       ...employees,
-      { id: uid(), nom: nom.trim(), poste: poste.trim(), tauxHoraire: tauxHoraire || "", typeContrat: "CDI", dateFinContrat: "" },
+      { id: uid(), nom: nom.trim(), poste: poste.trim(), tauxHoraire: tauxHoraire || "", typeContrat: "CDI", dateFinContrat: "", dateDebutContrat: "" },
     ]);
     setNom("");
     setPoste("");
@@ -1772,6 +1786,17 @@ function Salaries({ employees, updateEmployees }) {
                     </option>
                   ))}
                 </select>
+                <span className="text-xs" style={{ color: "#8A8271" }}>
+                  Début de contrat :
+                </span>
+                <input
+                  type="date"
+                  value={emp.dateDebutContrat || ""}
+                  onChange={(e) => updateField(emp.id, "dateDebutContrat", e.target.value)}
+                  className="px-2 py-1.5 rounded border text-xs"
+                  style={{ borderColor: PALETTE.line }}
+                  title="Utilisé pour ne pas payer la base mensualisée avant l'arrivée réelle du salarié"
+                />
                 {(emp.typeContrat === "CDD" || emp.typeContrat === "Saisonnier") && (
                   <>
                     <span className="text-xs" style={{ color: "#8A8271" }}>
@@ -3392,7 +3417,8 @@ function SimulationPaie({ employees, entries, transactions, primes, heuresSup, t
     const { joursAbsenceNonPayee, retenueHeures } = mensualise
       ? absenceRetenueInfo(emp, entries, start, end, heuresDefaut)
       : { joursAbsenceNonPayee: 0, retenueHeures: 0 };
-    const baseAjustee = mensualise ? Math.max(0, Number(heuresSup.heuresBaseMensualisee) - retenueHeures) : 0;
+    const baseNominale = mensualise ? baseNominaleProratisee(emp, start, end, heuresSup.heuresBaseMensualisee) : 0;
+    const baseAjustee = mensualise ? Math.max(0, baseNominale - retenueHeures) : 0;
     // En mode mensualisé, les jours de congé payé comptent comme des heures normales pour ne pas
     // faire artificiellement chuter la base (sinon la ligne "heures non travaillées" les compterait
     // comme un manque, alors que l'indemnité congés payés viendrait les rajouter séparément —
@@ -3423,6 +3449,7 @@ function SimulationPaie({ employees, entries, transactions, primes, heuresSup, t
       loyerAuto,
       conges,
       primesMontant,
+      baseNominale,
       heuresBase,
       heuresExcedent,
       joursAbsenceNonPayee,
@@ -3542,7 +3569,7 @@ function SimulationPaie({ employees, entries, transactions, primes, heuresSup, t
 
       <div className="space-y-2">
         {lignes.map(
-          ({ emp, b, brut, cotisations, m, deductions, loyerAuto, conges, primesMontant, heuresBase, heuresExcedent, joursAbsenceNonPayee, retenueHeures, net }) => {
+          ({ emp, b, brut, cotisations, m, deductions, loyerAuto, conges, primesMontant, heuresBase, heuresExcedent, baseNominale, joursAbsenceNonPayee, retenueHeures, net }) => {
           const hasRate = Number(emp.tauxHoraire) > 0;
           return (
             <div
@@ -3569,6 +3596,18 @@ function SimulationPaie({ employees, entries, transactions, primes, heuresSup, t
                         <span>Salaire de base</span>
                         <span>{fmtHoursDecimal(heuresSup.heuresBaseMensualisee)}</span>
                       </div>
+                      {baseNominale < Number(heuresSup.heuresBaseMensualisee) - 0.01 && (
+                        <div className="flex justify-between" style={{ color: PALETTE.rust }}>
+                          <span>
+                            − Prorata (entrée{emp.dateDebutContrat && emp.dateDebutContrat > start ? ` le ${emp.dateDebutContrat}` : ""}
+                            {(emp.typeContrat === "CDD" || emp.typeContrat === "Saisonnier") && emp.dateFinContrat && emp.dateFinContrat < end
+                              ? ` / sortie le ${emp.dateFinContrat}`
+                              : ""}
+                            )
+                          </span>
+                          <span>{fmtHours(Number(heuresSup.heuresBaseMensualisee) - baseNominale)}</span>
+                        </div>
+                      )}
                       {retenueHeures > 0 && (
                         <div className="flex justify-between" style={{ color: PALETTE.rust }}>
                           <span>
@@ -4147,7 +4186,8 @@ function computeSyntheseData(emp, entries, transactions, primes, heuresSup, taux
   const { joursAbsenceNonPayee, retenueHeures } = mensualise
     ? absenceRetenueInfo(emp, entries, start, end, heuresDefaut)
     : { joursAbsenceNonPayee: 0, retenueHeures: 0 };
-  const baseAjustee = mensualise ? Math.max(0, Number(heuresSup.heuresBaseMensualisee) - retenueHeures) : 0;
+  const baseNominale = mensualise ? baseNominaleProratisee(emp, start, end, heuresSup.heuresBaseMensualisee) : 0;
+  const baseAjustee = mensualise ? Math.max(0, baseNominale - retenueHeures) : 0;
   // En mode mensualisé, les congés payés comptent comme des heures normales dans la base (voir la
   // note détaillée dans SimulationPaie) — pas ajoutés une seconde fois séparément.
   const { base: heuresBase, excedent: heuresExcedent } = mensualise
@@ -4177,6 +4217,7 @@ function computeSyntheseData(emp, entries, transactions, primes, heuresSup, taux
     totalEff,
     totalPaye,
     heuresSupCalc,
+    baseNominale,
     heuresBase,
     heuresExcedent,
     joursAbsenceNonPayee,
@@ -4207,6 +4248,7 @@ function FicheSalarieContent({ emp, data, start, end, heuresSup, tauxCotisations
     totalEff,
     totalPaye,
     heuresSupCalc,
+    baseNominale,
     heuresBase,
     heuresExcedent,
     joursAbsenceNonPayee,
@@ -4374,6 +4416,18 @@ function FicheSalarieContent({ emp, data, start, end, heuresSup, tauxCotisations
                   <span>Salaire de base</span>
                   <span>{fmtHoursDecimal(heuresSup.heuresBaseMensualisee)}</span>
                 </div>
+                {baseNominale < Number(heuresSup.heuresBaseMensualisee) - 0.01 && (
+                  <div className="flex justify-between" style={{ color: PALETTE.rust }}>
+                    <span>
+                      − Prorata (entrée{emp.dateDebutContrat && emp.dateDebutContrat > start ? ` le ${emp.dateDebutContrat}` : ""}
+                      {(emp.typeContrat === "CDD" || emp.typeContrat === "Saisonnier") && emp.dateFinContrat && emp.dateFinContrat < end
+                        ? ` / sortie le ${emp.dateFinContrat}`
+                        : ""}
+                      )
+                    </span>
+                    <span>{fmtHours(Number(heuresSup.heuresBaseMensualisee) - baseNominale)}</span>
+                  </div>
+                )}
                 {retenueHeures > 0 && (
                   <div className="flex justify-between" style={{ color: PALETTE.rust }}>
                     <span>
@@ -5769,8 +5823,10 @@ function RecapHeures({ employees, entries, transactions, primes, heuresSup, taux
     const rows = [
       [
         "Salarié",
-        "Salaire de base (h)",
-        "Salaire de base (€)",
+        "Salaire de base nominal (h)",
+        "Prorata entrée/sortie (h)",
+        "Salaire de base réel (h)",
+        "Salaire de base réel (€)",
         "Absence non payée (h)",
         "Absence non payée (€)",
         "Congés payés inclus (h)",
@@ -5786,7 +5842,8 @@ function RecapHeures({ employees, entries, transactions, primes, heuresSup, taux
     employeesAffiches.forEach((emp) => {
       const data = computeSyntheseData(emp, entries, transactions, primes, heuresSup, tauxCotisations, heuresDefaut, start, end);
       const r = Number(emp.tauxHoraire) || 0;
-      const montantBase = r ? Number(heuresSup.heuresBaseMensualisee) * r : 0;
+      const prorata = Math.max(0, Number(heuresSup.heuresBaseMensualisee) - data.baseNominale);
+      const montantBaseReel = r ? data.heuresBase * r : 0;
       const montantExcedent = r ? data.heuresExcedent * r : 0;
       const montantMajo1 = r ? data.heuresSupCalc.majo1 * r * (1 + heuresSup.tauxMajo1 / 100) : 0;
       const montantMajo2 = r ? data.heuresSupCalc.majo2 * r * (1 + heuresSup.tauxMajo2 / 100) : 0;
@@ -5796,8 +5853,10 @@ function RecapHeures({ employees, entries, transactions, primes, heuresSup, taux
       const total = r ? (data.heuresBase + data.heuresExcedent) * r + montantMajo1 + montantMajo2 : 0;
       rows.push([
         emp.nom,
+        Number(heuresSup.heuresBaseMensualisee).toFixed(2),
+        prorata.toFixed(2),
         data.heuresBase.toFixed(2),
-        montantBase.toFixed(2),
+        montantBaseReel.toFixed(2),
         data.retenueHeures.toFixed(2),
         montantAbsence > 0 ? `-${montantAbsence.toFixed(2)}` : "0.00",
         data.conges.heures.toFixed(2),
@@ -5933,6 +5992,17 @@ function RecapHeures({ employees, entries, transactions, primes, heuresSup, taux
                     <strong className="w-20 text-right">{montantBaseNominal !== null ? fmtEuros(montantBaseNominal) : "—"}</strong>
                   </span>
                 </div>
+                {data.baseNominale < Number(heuresSup.heuresBaseMensualisee) - 0.01 && (
+                  <div className="flex justify-between" style={{ color: PALETTE.rust }}>
+                    <span>Prorata (entrée/sortie en cours de période)</span>
+                    <span className="flex gap-3">
+                      <span>− {fmtHours(Number(heuresSup.heuresBaseMensualisee) - data.baseNominale)}</span>
+                      <strong className="w-20 text-right">
+                        {r ? `− ${fmtEuros((Number(heuresSup.heuresBaseMensualisee) - data.baseNominale) * r)}` : "—"}
+                      </strong>
+                    </span>
+                  </div>
+                )}
                 {data.retenueHeures > 0 && (
                   <div className="flex justify-between" style={{ color: PALETTE.rust }}>
                     <span>Absences ({data.joursAbsenceNonPayee} j)</span>
