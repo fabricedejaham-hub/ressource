@@ -296,7 +296,7 @@ const isWeekend = (iso) => {
 // existante sur les jours concernés.
 const withCongeExtension = (entriesList, employeeId, date, motif, emp) => {
   if (motif !== "Congé payé") return entriesList;
-  const jours = emp && emp.joursTravailHabituels && emp.joursTravailHabituels.length > 0 ? emp.joursTravailHabituels : [1, 2, 3, 4, 5, 6];
+  const jours = emp && emp.joursTravailHabituels && emp.joursTravailHabituels.length > 0 ? emp.joursTravailHabituels : [1, 2, 3, 4, 5];
   let d = new Date(date + "T00:00:00");
   d.setDate(d.getDate() + 1);
   let next = entriesList;
@@ -1930,7 +1930,7 @@ function Salaries({ employees, updateEmployees }) {
                   Jours travaillés habituellement :
                 </span>
                 {JOURS_SEMAINE.map((j) => {
-                  const jours = emp.joursTravailHabituels && emp.joursTravailHabituels.length > 0 ? emp.joursTravailHabituels : [1, 2, 3, 4, 5, 6];
+                  const jours = emp.joursTravailHabituels && emp.joursTravailHabituels.length > 0 ? emp.joursTravailHabituels : [1, 2, 3, 4, 5];
                   const actif = jours.includes(j.n);
                   return (
                     <button
@@ -1950,8 +1950,8 @@ function Salaries({ employees, updateEmployees }) {
                     </button>
                   );
                 })}
-                <span className="text-xs" style={{ color: "#8A8271" }} title="Utilisé pour calculer correctement l'étendue d'un congé payé posé sur un jour isolé (temps partiel notamment)">
-                  ⓘ pour le calcul des congés
+                <span className="text-xs" style={{ color: "#8A8271" }} title="Par défaut (rien de configuré) : lundi-vendredi. Décochez d'autres jours ou cochez samedi selon le planning réel de ce salarié.">
+                  ⓘ défaut : lun-ven
                 </span>
               </div>
             </div>
